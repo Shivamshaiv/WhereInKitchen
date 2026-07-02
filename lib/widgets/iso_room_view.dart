@@ -6,11 +6,23 @@ import 'package:wherein_kitchen/models/storage_unit.dart';
 /// Layout rectangle of a unit on the room grid.
 typedef UnitLayout = ({int gx, int gy, int gw, int gh});
 
+/// Vertical band a unit occupies, in "storey" units where 1.0 ≈ one grid
+/// cell of height. Both values feed [_IsoGeometry.project]'s z.
+typedef ZBand = ({double bottom, double top});
+
+/// Max shelf rows used for canvas headroom (matches editor max).
+const int kIsoMaxShelfRows = kMaxShelfRows;
+
+/// Tallest possible top factor (tall/wall units), for canvas headroom.
+/// Accounts for a wall unit's raised base plus a tall explicit height.
+const double _kMaxTopFactor = 4.6;
+
 /// 2.5D isometric room renderer.
 ///
-/// Units are drawn as extruded boxes on an isometric floor. Heights vary by
-/// unit type (fridge tall, drawer low) so the room reads like a miniature
-/// kitchen instead of a flat plan.
+/// Units are extruded boxes on an isometric floor. Their vertical band comes
+/// from [StorageUnit.mount] (base sits on the floor, wall floats above the
+/// counter, tall runs floor-to-ceiling), and shelf count adds height within
+/// the band.
 class IsoRoomView extends StatefulWidget {
   const IsoRoomView({
     super.key,
@@ -24,13 +36,13 @@ class IsoRoomView extends StatefulWidget {
     this.selectedUnitId,
     this.onTapUnit,
     this.onTapEmpty,
-    this.onDragUnit,
+    this.onDragStart,
+    this.onMoveUnit,
     this.onDragEnd,
   });
 
-  /// Fixed on-screen size of one grid cell. The whole canvas grows with the
-  /// grid so large/complex rooms overflow the viewport and are pan/zoomable.
-  static const double defaultCell = 54;
+  /// Fixed on-screen size of one grid cell.
+  static const double defaultCell = 58;
 
   final List<StorageUnit> units;
   final UnitLayout Function(StorageUnit unit) layoutOf;
@@ -40,37 +52,30 @@ class IsoRoomView extends StatefulWidget {
   final int gridRows;
   final double cellSize;
   final String? selectedUnitId;
-  final void Function(StorageUnit unit)? onTapUnit;
+  final void Function(StorageUnit unit, Offset globalPosition)? onTapUnit;
   final VoidCallback? onTapEmpty;
+  final void Function(StorageUnit unit)? onDragStart;
 
-  /// Called continuously while dragging with grid-cell deltas.
-  final void Function(StorageUnit unit, int dgx, int dgy)? onDragUnit;
+  /// Called while dragging with absolute grid position (gx, gy).
+  final void Function(StorageUnit unit, int gx, int gy)? onMoveUnit;
   final void Function(StorageUnit unit)? onDragEnd;
 
   /// Total pixel size of the drawn room for a given grid + cell size.
   static Size canvasSize(int cols, int rows, {double cell = defaultCell}) {
-    final halfH = cell * 0.53;
-    final width = (cols + rows) * cell;
-    final height = halfH * 2 * 3.6 + (cols + rows) * halfH + halfH * 5;
-    return Size(width, height);
+    final geo = _IsoGeometry(gridCols: cols, gridRows: rows, cell: cell);
+    return Size(geo.canvasWidth, geo.canvasHeight);
   }
 
   @override
   State<IsoRoomView> createState() => _IsoRoomViewState();
 }
 
+ZBand _unitZBand(StorageUnit unit) => unitZBand(unit);
+
 class _IsoRoomViewState extends State<IsoRoomView> {
   StorageUnit? _dragging;
-  Offset _lastDragOffset = Offset.zero;
-
-  double _heightFactor(StorageUnitType type) => switch (type) {
-        StorageUnitType.fridge => 2.6,
-        StorageUnitType.freezer => 2.4,
-        StorageUnitType.cabinet => 1.9,
-        StorageUnitType.shelf => 1.6,
-        StorageUnitType.other => 1.2,
-        StorageUnitType.drawer => 0.8,
-      };
+  double _grabDx = 0;
+  double _grabDy = 0;
 
   Color _baseColor(StorageUnitType type, ColorScheme scheme) {
     final seed = switch (type) {
@@ -79,6 +84,11 @@ class _IsoRoomViewState extends State<IsoRoomView> {
       StorageUnitType.cabinet => const Color(0xFFA1887F),
       StorageUnitType.fridge => const Color(0xFF90A4AE),
       StorageUnitType.freezer => const Color(0xFF81D4FA),
+      StorageUnitType.range => const Color(0xFF546E7A),
+      StorageUnitType.sink => const Color(0xFFB0BEC5),
+      StorageUnitType.dishwasher => const Color(0xFF9E9E9E),
+      StorageUnitType.oven => const Color(0xFF607D8B),
+      StorageUnitType.gap => const Color(0xFF6D6D6D),
       StorageUnitType.other => const Color(0xFF9E9E9E),
     };
     return Color.lerp(seed, scheme.surfaceContainerHighest, 0.25)!;
@@ -94,41 +104,42 @@ class _IsoRoomViewState extends State<IsoRoomView> {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapUp: (details) => _handleTap(details.localPosition, geometry),
-      // Long-press-drag moves a unit. Using long-press (not pan) leaves the
-      // one-finger pan and pinch-zoom of the surrounding InteractiveViewer
-      // free, so a big room stays fully navigable in edit mode.
+      onTapUp: (details) => _handleTap(details, geometry),
       onLongPressStart: widget.editMode
           ? (details) {
-              _dragging = _unitAt(details.localPosition, geometry);
-              _lastDragOffset = Offset.zero;
-              if (_dragging != null) {
-                widget.onTapUnit?.call(_dragging!);
-              }
+              final unit = _unitAt(details.localPosition, geometry);
+              if (unit == null) return;
+              final layout = widget.layoutOf(unit);
+              final grid = geometry.unproject(details.localPosition);
+              _dragging = unit;
+              _grabDx = layout.gx - grid.x;
+              _grabDy = layout.gy - grid.y;
+              widget.onDragStart?.call(unit);
+              widget.onTapUnit?.call(unit, details.globalPosition);
             }
           : null,
       onLongPressMoveUpdate: widget.editMode
           ? (details) {
               final unit = _dragging;
               if (unit == null) return;
-              final delta = details.localOffsetFromOrigin - _lastDragOffset;
-              // Convert screen delta to grid delta (inverse iso basis).
-              final dgx =
-                  (delta.dx / geometry.halfW + delta.dy / geometry.halfH) / 2;
-              final dgy =
-                  (delta.dy / geometry.halfH - delta.dx / geometry.halfW) / 2;
-              final stepX = dgx.round();
-              final stepY = dgy.round();
-              if (stepX != 0 || stepY != 0) {
-                _lastDragOffset = details.localOffsetFromOrigin;
-                widget.onDragUnit?.call(unit, stepX, stepY);
+              final layout = widget.layoutOf(unit);
+              final grid = geometry.unproject(details.localPosition);
+              final nx = (grid.x + _grabDx).round();
+              final ny = (grid.y + _grabDy).round();
+              final clampedGx =
+                  nx.clamp(0, widget.gridCols - layout.gw).toInt();
+              final clampedGy =
+                  ny.clamp(0, widget.gridRows - layout.gh).toInt();
+              if (clampedGx != layout.gx || clampedGy != layout.gy) {
+                widget.onMoveUnit?.call(unit, clampedGx, clampedGy);
               }
             }
           : null,
       onLongPressEnd: widget.editMode
           ? (_) {
-              if (_dragging != null) {
-                widget.onDragEnd?.call(_dragging!);
+              final unit = _dragging;
+              if (unit != null) {
+                widget.onDragEnd?.call(unit);
               }
               _dragging = null;
             }
@@ -143,43 +154,43 @@ class _IsoRoomViewState extends State<IsoRoomView> {
           editMode: widget.editMode,
           selectedUnitId: widget.selectedUnitId,
           scheme: Theme.of(context).colorScheme,
-          textTheme: Theme.of(context).textTheme,
-          heightFactor: _heightFactor,
           baseColor: (type) => _baseColor(type, Theme.of(context).colorScheme),
         ),
       ),
     );
   }
 
-  void _handleTap(Offset position, _IsoGeometry geometry) {
-    final unit = _unitAt(position, geometry);
+  void _handleTap(TapUpDetails details, _IsoGeometry geometry) {
+    final unit = _unitAt(details.localPosition, geometry);
     if (unit != null) {
-      widget.onTapUnit?.call(unit);
+      widget.onTapUnit?.call(unit, details.globalPosition);
     } else {
       widget.onTapEmpty?.call();
     }
   }
 
   StorageUnit? _unitAt(Offset position, _IsoGeometry geometry) {
-    // Front-most units first (reverse paint order).
+    // Prefer topmost / frontmost units.
     final sorted = [...widget.units]..sort((a, b) {
         final la = widget.layoutOf(a);
         final lb = widget.layoutOf(b);
-        return (lb.gx + lb.gy + lb.gw + lb.gh)
-            .compareTo(la.gx + la.gy + la.gw + la.gh);
+        final fa = la.gx + la.gy + _unitZBand(a).top;
+        final fb = lb.gx + lb.gy + _unitZBand(b).top;
+        return fb.compareTo(fa);
       });
 
     for (final unit in sorted) {
       final layout = widget.layoutOf(unit);
-      final h = geometry.halfH * 2 * _heightFactor(unit.type);
-      final silhouette = geometry.silhouette(layout, h);
+      final band = _unitZBand(unit);
+      final zTop = geometry.zPx(band.top);
+      final zBottom = geometry.zPx(band.bottom);
+      final silhouette = geometry.silhouette(layout, zTop, zBottom);
       if (_pointInPolygon(position, silhouette)) return unit;
 
-      // Also accept taps on the floating label bubble above the box.
       final topCenter = geometry.project(
         layout.gx + layout.gw / 2,
         layout.gy + layout.gh / 2,
-        h,
+        zTop,
       );
       final labelRect = Rect.fromCenter(
         center: Offset(topCenter.dx, topCenter.dy - 28),
@@ -211,12 +222,9 @@ class _IsoGeometry {
     required this.gridRows,
     required double cell,
   }) {
-    // Fixed cell size: the canvas grows with the grid rather than being
-    // squeezed to fit the screen, so complex layouts stay big and legible.
     halfW = cell;
     halfH = cell * 0.53;
-    originX = gridRows * halfW; // left edge of floor sits at x = 0
-    originY = halfH * 2 * 3.6; // headroom for tall units + labels
+    originX = gridRows * halfW;
   }
 
   final int gridCols;
@@ -224,12 +232,17 @@ class _IsoGeometry {
   late final double halfW;
   late final double halfH;
   late final double originX;
-  late final double originY;
+
+  /// Convert a storey factor into pixel z.
+  double zPx(double factor) => halfH * 2 * factor;
+
+  /// Headroom for tallest unit + floating label.
+  double get originY => zPx(_kMaxTopFactor) + halfH * 4;
 
   double get canvasWidth => (gridCols + gridRows) * halfW;
 
   double get canvasHeight =>
-      originY + (gridCols + gridRows) * halfH + halfH * 5;
+      originY + (gridCols + gridRows) * halfH + halfH * 3;
 
   Offset project(double x, double y, [double z = 0]) {
     return Offset(
@@ -238,35 +251,41 @@ class _IsoGeometry {
     );
   }
 
-  List<Offset> topFace(UnitLayout l, double h) => [
-        project(l.gx.toDouble(), l.gy.toDouble(), h),
-        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), h),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), h),
-        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), h),
+  /// Inverse project screen point onto the floor plane (z = 0).
+  ({double x, double y}) unproject(Offset p) {
+    final ux = (p.dx - originX) / halfW;
+    final uy = (p.dy - originY) / halfH;
+    return (x: (ux + uy) / 2, y: (uy - ux) / 2);
+  }
+
+  List<Offset> topFace(UnitLayout l, double zTop) => [
+        project(l.gx.toDouble(), l.gy.toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zTop),
+        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), zTop),
       ];
 
-  List<Offset> rightFace(UnitLayout l, double h) => [
-        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), h),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), h),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), 0),
-        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), 0),
+  List<Offset> rightFace(UnitLayout l, double zTop, double zBottom) => [
+        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zBottom),
+        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), zBottom),
       ];
 
-  List<Offset> frontFace(UnitLayout l, double h) => [
-        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), h),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), h),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), 0),
-        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), 0),
+  List<Offset> frontFace(UnitLayout l, double zTop, double zBottom) => [
+        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zBottom),
+        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), zBottom),
       ];
 
-  /// Full outline used for hit-testing (top + both visible faces).
-  List<Offset> silhouette(UnitLayout l, double h) => [
-        project(l.gx.toDouble(), l.gy.toDouble(), h),
-        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), h),
-        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), 0),
-        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), 0),
-        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), 0),
-        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), h),
+  List<Offset> silhouette(UnitLayout l, double zTop, double zBottom) => [
+        project(l.gx.toDouble(), l.gy.toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), zTop),
+        project((l.gx + l.gw).toDouble(), l.gy.toDouble(), zBottom),
+        project((l.gx + l.gw).toDouble(), (l.gy + l.gh).toDouble(), zBottom),
+        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), zBottom),
+        project(l.gx.toDouble(), (l.gy + l.gh).toDouble(), zTop),
       ];
 }
 
@@ -279,8 +298,6 @@ class _IsoRoomPainter extends CustomPainter {
     required this.editMode,
     required this.selectedUnitId,
     required this.scheme,
-    required this.textTheme,
-    required this.heightFactor,
     required this.baseColor,
   });
 
@@ -291,8 +308,6 @@ class _IsoRoomPainter extends CustomPainter {
   final bool editMode;
   final String? selectedUnitId;
   final ColorScheme scheme;
-  final TextTheme textTheme;
-  final double Function(StorageUnitType) heightFactor;
   final Color Function(StorageUnitType) baseColor;
 
   @override
@@ -300,12 +315,15 @@ class _IsoRoomPainter extends CustomPainter {
     _paintFloor(canvas);
     if (editMode) _paintGrid(canvas);
 
-    // Back-to-front paint order.
+    // Painter's algorithm: draw back-to-front, then lower band before upper
+    // so wall cabinets sit visually above base cabinets.
     final sorted = [...units]..sort((a, b) {
         final la = layoutOf(a);
         final lb = layoutOf(b);
-        return (la.gx + la.gy + la.gw + la.gh)
-            .compareTo(lb.gx + lb.gy + lb.gw + lb.gh);
+        final depthA = la.gx + la.gy;
+        final depthB = lb.gx + lb.gy;
+        if (depthA != depthB) return depthA.compareTo(depthB);
+        return _unitZBand(a).bottom.compareTo(_unitZBand(b).bottom);
       });
 
     for (final unit in sorted) {
@@ -326,8 +344,8 @@ class _IsoRoomPainter extends CustomPainter {
     canvas.drawPath(
       floor,
       Paint()
-        ..color = Color.lerp(
-            scheme.surfaceContainerLow, scheme.primary, 0.04)!,
+        ..color =
+            Color.lerp(scheme.surfaceContainerLow, scheme.primary, 0.04)!,
     );
     canvas.drawPath(
       floor,
@@ -342,7 +360,7 @@ class _IsoRoomPainter extends CustomPainter {
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1
-      ..color = scheme.outlineVariant.withValues(alpha: 0.4);
+      ..color = scheme.outlineVariant.withValues(alpha: 0.35);
 
     for (var x = 1; x < geometry.gridCols; x++) {
       canvas.drawLine(
@@ -362,25 +380,31 @@ class _IsoRoomPainter extends CustomPainter {
 
   void _paintUnit(Canvas canvas, StorageUnit unit) {
     final layout = layoutOf(unit);
+
+    if (unit.type == StorageUnitType.gap) {
+      _paintGap(canvas, unit, layout);
+      return;
+    }
+
     final selected = unit.id == selectedUnitId;
-    final h = geometry.halfH * 2 * heightFactor(unit.type);
+    final band = _unitZBand(unit);
+    final zTop = geometry.zPx(band.top);
+    final zBottom = geometry.zPx(band.bottom);
 
     final base = baseColor(unit.type);
     final top = selected
         ? Color.lerp(base, scheme.primary, 0.45)!
         : Color.lerp(base, Colors.white, 0.18)!;
-    final right = _shade(selected
-        ? Color.lerp(base, scheme.primary, 0.35)!
-        : base, 0.75);
-    final front = _shade(selected
-        ? Color.lerp(base, scheme.primary, 0.35)!
-        : base, 0.55);
+    final right = _shade(
+        selected ? Color.lerp(base, scheme.primary, 0.35)! : base, 0.75);
+    final front = _shade(
+        selected ? Color.lerp(base, scheme.primary, 0.35)! : base, 0.55);
 
-    // Drop shadow on floor.
+    // Contact shadow at the band's bottom.
     final shadowPath = Path()
       ..addPolygon(
         geometry
-            .topFace(layout, 0)
+            .topFace(layout, zBottom)
             .map((p) => p.translate(4, 3))
             .toList(),
         true,
@@ -388,7 +412,7 @@ class _IsoRoomPainter extends CustomPainter {
     canvas.drawPath(
       shadowPath,
       Paint()
-        ..color = Colors.black.withValues(alpha: 0.28)
+        ..color = Colors.black.withValues(alpha: 0.24)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
     );
 
@@ -406,64 +430,227 @@ class _IsoRoomPainter extends CustomPainter {
       );
     }
 
-    face(geometry.rightFace(layout, h), right);
-    face(geometry.frontFace(layout, h), front);
-    face(geometry.topFace(layout, h), top);
+    face(geometry.rightFace(layout, zTop, zBottom), right);
+    face(geometry.frontFace(layout, zTop, zBottom), front);
+    face(geometry.topFace(layout, zTop), top);
 
-    _paintFaceDetails(canvas, unit, layout, h, front);
-    _paintLabel(canvas, unit, layout, h);
+    if (unit.holdsItems) {
+      _paintSubShelves(canvas, unit, layout, zTop, zBottom);
+    }
+    _paintTypeDetails(canvas, unit, layout, zTop, zBottom);
+    _paintFacingArrow(canvas, unit, layout, zTop);
+    _paintLabel(canvas, unit, layout, zTop);
   }
 
-  /// Simple front-face detailing: drawer lines, cabinet doors, fridge handle.
-  void _paintFaceDetails(
+  /// Open space: a translucent floor rectangle with a dashed edge + label.
+  void _paintGap(Canvas canvas, StorageUnit unit, UnitLayout layout) {
+    final poly = geometry.topFace(layout, 0);
+    final path = Path()..addPolygon(poly, true);
+    canvas.drawPath(
+      path,
+      Paint()..color = scheme.outlineVariant.withValues(alpha: 0.14),
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = unit.id == selectedUnitId ? 2.4 : 1.2
+        ..color = unit.id == selectedUnitId
+            ? scheme.primary
+            : scheme.outline.withValues(alpha: 0.5),
+    );
+    _paintLabel(canvas, unit, layout, geometry.zPx(0.05));
+  }
+
+  /// Horizontal shelf ledges for each row (sub-shelves) within the band.
+  void _paintSubShelves(
     Canvas canvas,
     StorageUnit unit,
     UnitLayout layout,
-    double h,
-    Color front,
+    double zTop,
+    double zBottom,
+  ) {
+    final rowCount = unit.rows.clamp(1, kIsoMaxShelfRows);
+    final shelfPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0
+      ..color = Colors.black.withValues(alpha: 0.32);
+    final ledgePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..color = Colors.white.withValues(alpha: 0.32);
+
+    // Shelves are drawn on the face the unit's doors point at. In this iso
+    // projection only the front (+y, facing 0) and right (+x, facing 1)
+    // faces are visible; for back/left facings we fall back to the front so
+    // the interior is still readable, and the facing arrow tells the truth.
+    final onRightFace = unit.facing % 4 == 1;
+
+    Offset lerpFront(double t, double z) {
+      if (onRightFace) {
+        final a = geometry.project(
+            (layout.gx + layout.gw).toDouble(), layout.gy.toDouble(), z);
+        final b = geometry.project((layout.gx + layout.gw).toDouble(),
+            (layout.gy + layout.gh).toDouble(), z);
+        return Offset.lerp(a, b, t)!;
+      }
+      final a = geometry.project(
+          layout.gx.toDouble(), (layout.gy + layout.gh).toDouble(), z);
+      final b = geometry.project((layout.gx + layout.gw).toDouble(),
+          (layout.gy + layout.gh).toDouble(), z);
+      return Offset.lerp(a, b, t)!;
+    }
+
+    for (var i = 1; i < rowCount; i++) {
+      final z = zBottom + (zTop - zBottom) * (i / rowCount);
+      final left = lerpFront(0.05, z);
+      final right = lerpFront(0.95, z);
+      canvas.drawLine(left, right, shelfPaint);
+      canvas.drawLine(left, right, ledgePaint);
+    }
+
+    // Vertical bay dividers (columns).
+    if (unit.columns > 1) {
+      for (var c = 1; c < unit.columns; c++) {
+        final t = c / unit.columns;
+        canvas.drawLine(
+          lerpFront(t, zBottom),
+          lerpFront(t, zTop),
+          shelfPaint,
+        );
+      }
+    }
+  }
+
+  void _paintTypeDetails(
+    Canvas canvas,
+    StorageUnit unit,
+    UnitLayout layout,
+    double zTop,
+    double zBottom,
   ) {
     final linePaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2
       ..color = Colors.black.withValues(alpha: 0.25);
 
-    Offset lerpFront(double t, double zFrac) {
+    Offset lerpFront(double t, double z) {
       final a = geometry.project(
-          layout.gx.toDouble(), (layout.gy + layout.gh).toDouble(), h * zFrac);
+          layout.gx.toDouble(), (layout.gy + layout.gh).toDouble(), z);
       final b = geometry.project((layout.gx + layout.gw).toDouble(),
-          (layout.gy + layout.gh).toDouble(), h * zFrac);
+          (layout.gy + layout.gh).toDouble(), z);
       return Offset.lerp(a, b, t)!;
     }
 
+    Offset lerpTop(double tx, double ty) {
+      final front = Offset.lerp(
+        geometry.project(layout.gx.toDouble(), layout.gy.toDouble(), zTop),
+        geometry.project(
+            (layout.gx + layout.gw).toDouble(), layout.gy.toDouble(), zTop),
+        tx,
+      )!;
+      final back = Offset.lerp(
+        geometry.project(
+            layout.gx.toDouble(), (layout.gy + layout.gh).toDouble(), zTop),
+        geometry.project((layout.gx + layout.gw).toDouble(),
+            (layout.gy + layout.gh).toDouble(), zTop),
+        tx,
+      )!;
+      return Offset.lerp(front, back, ty)!;
+    }
+
     switch (unit.type) {
-      case StorageUnitType.drawer:
-      case StorageUnitType.shelf:
-        final rowCount = math.min(unit.rows, 4);
-        for (var i = 1; i < rowCount; i++) {
-          final zFrac = i / rowCount;
-          canvas.drawLine(lerpFront(0.06, zFrac), lerpFront(0.94, zFrac),
-              linePaint);
-        }
       case StorageUnitType.cabinet:
-        canvas.drawLine(lerpFront(0.5, 0.06), lerpFront(0.5, 0.94), linePaint);
+        canvas.drawLine(lerpFront(0.5, zBottom + (zTop - zBottom) * 0.06),
+            lerpFront(0.5, zBottom + (zTop - zBottom) * 0.94), linePaint);
       case StorageUnitType.fridge:
       case StorageUnitType.freezer:
-        canvas.drawLine(lerpFront(0.06, 0.62), lerpFront(0.94, 0.62),
-            linePaint);
-        canvas.drawLine(lerpFront(0.16, 0.7), lerpFront(0.16, 0.9),
+        final mid = zBottom + (zTop - zBottom) * 0.62;
+        canvas.drawLine(lerpFront(0.06, mid), lerpFront(0.94, mid), linePaint);
+        canvas.drawLine(
+            lerpFront(0.16, mid + (zTop - mid) * 0.12),
+            lerpFront(0.16, mid + (zTop - mid) * 0.7),
             linePaint..strokeWidth = 2.4);
+      case StorageUnitType.dishwasher:
+      case StorageUnitType.oven:
+        final hz = zBottom + (zTop - zBottom) * 0.82;
+        canvas.drawLine(lerpFront(0.15, hz), lerpFront(0.85, hz),
+            linePaint..strokeWidth = 2.2);
+      case StorageUnitType.range:
+        // Four burners on the cooktop surface.
+        final burner = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = Colors.black.withValues(alpha: 0.4);
+        for (final tx in [0.3, 0.7]) {
+          for (final ty in [0.3, 0.7]) {
+            canvas.drawCircle(lerpTop(tx, ty), geometry.halfW * 0.16, burner);
+          }
+        }
+      case StorageUnitType.sink:
+        // A basin outline on the surface + faucet dot.
+        final basin = <Offset>[
+          lerpTop(0.2, 0.25),
+          lerpTop(0.8, 0.25),
+          lerpTop(0.8, 0.75),
+          lerpTop(0.2, 0.75),
+        ];
+        canvas.drawPath(
+          Path()..addPolygon(basin, true),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2
+            ..color = Colors.black.withValues(alpha: 0.4),
+        );
+        canvas.drawCircle(
+          lerpTop(0.5, 0.12),
+          geometry.halfW * 0.07,
+          Paint()..color = Colors.black.withValues(alpha: 0.4),
+        );
+      case StorageUnitType.drawer:
+      case StorageUnitType.shelf:
+      case StorageUnitType.gap:
       case StorageUnitType.other:
         break;
     }
   }
 
+  /// Small arrow on the top face showing which way the unit faces.
+  void _paintFacingArrow(
+      Canvas canvas, StorageUnit unit, UnitLayout layout, double zTop) {
+    if (unit.facing % 4 == 0) return; // Default facing needs no marker.
+
+    final cx = layout.gx + layout.gw / 2;
+    final cy = layout.gy + layout.gh / 2;
+    final (dx, dy) = switch (unit.facing % 4) {
+      1 => (1.0, 0.0),
+      2 => (0.0, -1.0),
+      _ => (-1.0, 0.0),
+    };
+    final len = math.min(layout.gw, layout.gh) * 0.3;
+
+    final tail = geometry.project(cx - dx * len * 0.5, cy - dy * len * 0.5, zTop);
+    final tip = geometry.project(cx + dx * len, cy + dy * len, zTop);
+    final wing1 = geometry.project(
+        cx + dx * len * 0.4 - dy * len * 0.3, cy + dy * len * 0.4 + dx * len * 0.3, zTop);
+    final wing2 = geometry.project(
+        cx + dx * len * 0.4 + dy * len * 0.3, cy + dy * len * 0.4 - dx * len * 0.3, zTop);
+
+    final paint = Paint()
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.round
+      ..color = Colors.black.withValues(alpha: 0.5);
+    canvas.drawLine(tail, tip, paint);
+    canvas.drawLine(tip, wing1, paint);
+    canvas.drawLine(tip, wing2, paint);
+  }
+
   void _paintLabel(
-      Canvas canvas, StorageUnit unit, UnitLayout layout, double h) {
-    // Anchor above the top face so the box itself stays visible.
+      Canvas canvas, StorageUnit unit, UnitLayout layout, double zTop) {
     final topCenter = geometry.project(
       layout.gx + layout.gw / 2,
       layout.gy + layout.gh / 2,
-      h,
+      zTop,
     );
 
     final count = itemCountByUnit[unit.id] ?? 0;
@@ -484,9 +671,16 @@ class _IsoRoomPainter extends CustomPainter {
       ellipsis: '…',
     )..layout(maxWidth: 150);
 
+    final String subLine;
+    if (!unit.holdsItems) {
+      subLine = unit.type.label;
+    } else {
+      final shelfLine = '${unit.rows} shelf${unit.rows == 1 ? '' : 's'}';
+      subLine = count == 0 ? shelfLine : '$shelfLine · $count items';
+    }
     final countPainter = TextPainter(
       text: TextSpan(
-        text: count == 0 ? 'empty' : '$count item${count == 1 ? '' : 's'}',
+        text: '${unit.mount.label} · $subLine',
         style: TextStyle(
           fontSize: 10.5,
           fontWeight: FontWeight.w600,
@@ -501,7 +695,6 @@ class _IsoRoomPainter extends CustomPainter {
     final bubbleH = totalH + 12;
     final bubbleCenter = Offset(topCenter.dx, topCenter.dy - bubbleH / 2 - 10);
 
-    // Pointer line from bubble to box top.
     canvas.drawLine(
       Offset(topCenter.dx, bubbleCenter.dy + bubbleH / 2),
       topCenter,

@@ -30,6 +30,35 @@ class HouseholdRepository {
     });
   }
 
+  /// Every household this user is a member of (for the house switcher).
+  Stream<List<Household>> watchMyHouseholds(String uid) {
+    return _collection
+        .where('members', arrayContains: uid)
+        .snapshots()
+        .map((snapshot) {
+      final households = snapshot.docs
+          .map((doc) => Household.fromMap(doc.id, doc.data()))
+          .toList();
+      households.sort((a, b) => a.name.toLowerCase().compareTo(
+            b.name.toLowerCase(),
+          ));
+      return households;
+    });
+  }
+
+  /// Marks [householdId] as the user's active home (persists across launches).
+  Future<void> setActiveHousehold(String uid, String householdId) =>
+      _linkUserToHousehold(uid, householdId);
+
+  /// Joins the household by id (from an invite QR/code) and makes it active.
+  /// Returns the household, or null if it doesn't exist.
+  Future<Household?> joinHousehold(String uid, String householdId) async {
+    final household = await getHousehold(householdId);
+    if (household == null) return null;
+    await addMember(householdId, uid);
+    return household;
+  }
+
   Future<Household?> getHousehold(String householdId) async {
     final doc = await _collection.doc(householdId).get();
     if (!doc.exists) return null;

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:wherein_kitchen/models/product.dart';
+import 'package:wherein_kitchen/services/api_usage_service.dart';
 
 /// Looks up a barcode across several completely-free, no-API-key product
 /// databases and returns the first match.
@@ -17,10 +18,15 @@ import 'package:wherein_kitchen/models/product.dart';
 /// The four Open*Facts projects share the same v2 API shape, so they use one
 /// parser; UPCitemdb has its own response format.
 class ProductLookupService {
-  ProductLookupService({http.Client? client})
-      : _client = client ?? http.Client();
+  ProductLookupService({http.Client? client, ApiUsageService? usage})
+      : _client = client ?? http.Client(),
+        _usage = usage;
 
   final http.Client _client;
+
+  /// Optional tracker; each real network call to a source is recorded so the
+  /// Settings screen can show usage against free-tier daily limits.
+  final ApiUsageService? _usage;
 
   static const Duration _timeout = Duration(seconds: 6);
   // Open Food Facts asks callers to identify themselves via User-Agent.
@@ -73,6 +79,7 @@ class ProductLookupService {
       final uri = Uri.parse(
         'https://${src.host}/api/v2/product/$barcode.json',
       );
+      unawaited(_usage?.recordCall(src.source));
       final response = await _client.get(uri, headers: _headers).timeout(_timeout);
       if (response.statusCode != 200) return null;
 
@@ -115,6 +122,7 @@ class ProductLookupService {
       final uri = Uri.parse(
         'https://api.upcitemdb.com/prod/trial/lookup?upc=$barcode',
       );
+      unawaited(_usage?.recordCall('upcitemdb'));
       final response = await _client.get(uri, headers: _headers).timeout(_timeout);
       if (response.statusCode != 200) return null;
 

@@ -12,6 +12,7 @@ import 'package:wherein_kitchen/models/item.dart';
 import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
+import 'package:wherein_kitchen/services/api_usage_service.dart';
 import 'package:wherein_kitchen/services/auth_service.dart';
 import 'package:wherein_kitchen/services/product_lookup_service.dart';
 
@@ -49,8 +50,17 @@ final productRepositoryProvider = Provider<ProductRepository>((ref) {
   return ProductRepository(ref.watch(firestoreProvider));
 });
 
+final apiUsageServiceProvider = Provider<ApiUsageService>((ref) {
+  return ApiUsageService();
+});
+
 final productLookupServiceProvider = Provider<ProductLookupService>((ref) {
-  return ProductLookupService();
+  return ProductLookupService(usage: ref.watch(apiUsageServiceProvider));
+});
+
+/// Snapshot of barcode API usage for the Settings screen. Invalidate to refresh.
+final apiUsageProvider = FutureProvider.autoDispose<ApiUsageSnapshot>((ref) {
+  return ref.watch(apiUsageServiceProvider).load();
 });
 
 final householdIdProvider = StateProvider<String?>((ref) => null);
@@ -61,6 +71,13 @@ final householdProvider = StreamProvider<Household?>((ref) {
   return ref
       .watch(householdRepositoryProvider)
       .watchHousehold(householdId);
+});
+
+/// All homes the signed-in user belongs to (for the house switcher).
+final myHouseholdsProvider = StreamProvider<List<Household>>((ref) {
+  final uid = ref.watch(authStateProvider).valueOrNull?.uid;
+  if (uid == null) return const Stream.empty();
+  return ref.watch(householdRepositoryProvider).watchMyHouseholds(uid);
 });
 
 final roomsProvider = StreamProvider<List<Room>>((ref) {

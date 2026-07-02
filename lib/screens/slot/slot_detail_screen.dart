@@ -7,6 +7,7 @@ import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/item/add_item_screen.dart';
 import 'package:wherein_kitchen/screens/item/item_actions_sheet.dart';
 import 'package:wherein_kitchen/screens/qr/qr_label_screen.dart';
+import 'package:wherein_kitchen/screens/scan/scan_screen.dart';
 import 'package:wherein_kitchen/widgets/item_list_tile.dart';
 
 class SlotDetailScreen extends ConsumerStatefulWidget {
@@ -55,6 +56,17 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
     } finally {
       if (mounted) setState(() => _adding = false);
     }
+  }
+
+  void _scanIntoShelf() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ScanScreen(
+          targetUnit: widget.unit,
+          targetSlot: widget.slot,
+        ),
+      ),
+    );
   }
 
   Future<void> _renameShelf() async {
@@ -230,37 +242,51 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
       ),
       body: Column(
         children: [
-          // Quick add bar: type, enter, repeat.
+          // Quick add bar: type or scan, then repeat.
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: TextField(
-              controller: _quickAddController,
-              focusNode: _quickAddFocus,
-              textCapitalization: TextCapitalization.sentences,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => _quickAdd(),
-              decoration: InputDecoration(
-                hintText: 'Type item name, press ✓ to add…',
-                prefixIcon: const Icon(Icons.add),
-                suffixIcon: _adding
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : IconButton(
-                        icon: const Icon(Icons.check_circle),
-                        color: Theme.of(context).colorScheme.primary,
-                        onPressed: _quickAdd,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _quickAddController,
+                    focusNode: _quickAddFocus,
+                    textCapitalization: TextCapitalization.sentences,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _quickAdd(),
+                    decoration: InputDecoration(
+                      hintText: 'Type item name, press ✓ to add…',
+                      prefixIcon: const Icon(Icons.add),
+                      suffixIcon: _adding
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 20,
+                                height: 20,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : IconButton(
+                              icon: const Icon(Icons.check_circle),
+                              color: Theme.of(context).colorScheme.primary,
+                              onPressed: _quickAdd,
+                            ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(28),
                       ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(28),
+                      filled: true,
+                    ),
+                  ),
                 ),
-                filled: true,
-              ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  tooltip: 'Scan & place items here',
+                  iconSize: 26,
+                  onPressed: _scanIntoShelf,
+                  icon: const Icon(Icons.qr_code_scanner),
+                ),
+              ],
             ),
           ),
           Padding(

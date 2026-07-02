@@ -44,6 +44,9 @@ class SlotRepository {
     required String householdId,
     required StorageUnit unit,
   }) async {
+    // Appliances / open spaces hold no items, so they get no slots.
+    if (!unit.holdsItems) return const [];
+
     final existing = await _collection(householdId)
         .where('unitId', isEqualTo: unit.id)
         .get();
@@ -89,6 +92,18 @@ class SlotRepository {
     final existing = await _collection(householdId)
         .where('unitId', isEqualTo: unit.id)
         .get();
+
+    // If the unit no longer holds items (e.g. changed to an appliance),
+    // remove any stale slots.
+    if (!unit.holdsItems) {
+      if (existing.docs.isEmpty) return;
+      final removeBatch = _firestore.batch();
+      for (final doc in existing.docs) {
+        removeBatch.delete(doc.reference);
+      }
+      await removeBatch.commit();
+      return;
+    }
 
     final byPosition = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
     for (final doc in existing.docs) {

@@ -43,6 +43,8 @@ class UnitRepository {
     required int rows,
     required int columns,
     required int sortOrder,
+    UnitMount mount = UnitMount.base,
+    int? heightCm,
   }) async {
     final doc = _collection(householdId).doc();
     final unit = StorageUnit(
@@ -54,6 +56,8 @@ class UnitRepository {
       rows: rows,
       columns: columns,
       sortOrder: sortOrder,
+      mount: mount,
+      heightCm: heightCm,
     );
     await doc.set(unit.toMap());
     return unit;

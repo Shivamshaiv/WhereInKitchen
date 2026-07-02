@@ -3,8 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:wherein_kitchen/models/household.dart';
 import 'package:wherein_kitchen/models/item.dart';
 import 'package:wherein_kitchen/models/product.dart';
+import 'package:wherein_kitchen/models/slot.dart';
+import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/item/add_item_screen.dart';
 import 'package:wherein_kitchen/screens/item/item_actions_sheet.dart';
@@ -12,7 +15,16 @@ import 'package:wherein_kitchen/screens/search/search_result_screen.dart';
 import 'package:wherein_kitchen/screens/slot/slot_detail_screen.dart';
 
 class ScanScreen extends ConsumerStatefulWidget {
-  const ScanScreen({super.key});
+  const ScanScreen({
+    super.key,
+    this.targetUnit,
+    this.targetSlot,
+  });
+
+  /// When [targetSlot] is set, scanning places items straight onto that shelf
+  /// in a rapid "scan and place" loop instead of the general scan flow.
+  final StorageUnit? targetUnit;
+  final Slot? targetSlot;
 
   @override
   ConsumerState<ScanScreen> createState() => _ScanScreenState();
@@ -42,6 +54,9 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
   StreamSubscription<BarcodeCapture>? _subscription;
   bool _processing = false;
   String? _status;
+  int _placedCount = 0;
+
+  bool get _placingIntoSlot => widget.targetSlot != null;
 
   @override
   void initState() {
@@ -106,8 +121,22 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
 
+    if (barcode.startsWith(kJoinUriPrefix)) {
+      await _handleJoinInvite(barcode);
+      return;
+    }
+
     if (barcode.startsWith('whereinkitchen://slot/')) {
+      if (_placingIntoSlot) {
+        _toast('That is a shelf label — point at a product barcode');
+        return;
+      }
       await _handleShelfQr(barcode);
+      return;
+    }
+
+    if (_placingIntoSlot) {
+      await _placeScan(barcode);
       return;
     }
 
@@ -143,6 +172,31 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     }
   }
 
+  /// Scanned a home invite QR: join that household and make it active.
+  Future<void> _handleJoinInvite(String payload) async {
+    final uid = ref.read(authStateProvider).valueOrNull?.uid;
+    if (uid == null) return;
+
+    final householdId = parseHouseholdInvite(payload);
+    final household =
+        await ref.read(householdRepositoryProvider).joinHousehold(uid, householdId);
+    if (!mounted) return;
+
+    if (household == null) {
+      _toast('That home invite is no longer valid');
+      return;
+    }
+
+    ref.read(householdIdProvider.notifier).state = household.id;
+    // Back out of the scanner to the home screen, now in the joined home.
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text('Joined “${household.name}”')),
+      );
+  }
+
   Future<void> _handleShelfQr(String payload) async {
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
@@ -165,6 +219,122 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
         builder: (_) => SlotDetailScreen(unit: unit, slot: slot),
       ),
     );
+  }
+
+  /// Scan-and-place: look up the product and drop it onto the target shelf,
+  /// then keep scanning so the user can place several items in a row.
+  Future<void> _placeScan(String barcode) async {
+    final householdId = ref.read(householdIdProvider);
+    final slot = widget.targetSlot;
+    if (householdId == null || slot == null) return;
+
+    Product? product =
+        await ref.read(productRepositoryProvider).getProduct(householdId, barcode);
+    product ??=
+        await ref.read(productLookupServiceProvider).lookupBarcode(barcode);
+    if (product != null) {
+      await ref.read(productRepositoryProvider).saveProduct(householdId, product);
+    }
+    if (!mounted) return;
+
+    if (product != null) {
+      await ref.read(itemRepositoryProvider).placeInSlot(
+            householdId: householdId,
+            slotId: slot.id,
+            name: product.name,
+            category: product.category,
+            barcode: barcode,
+            imageUrl: product.imageUrl,
+          );
+      if (mounted) {
+        setState(() => _placedCount++);
+        _toast('Placed ${product.name} on ${slot.label}');
+      }
+    } else {
+      await _promptNameAndPlace(barcode);
+    }
+  }
+
+  /// Unknown barcode while placing: let the user name it, then drop it in.
+  Future<void> _promptNameAndPlace(String barcode) async {
+    final slot = widget.targetSlot;
+    if (slot == null) return;
+    final controller = TextEditingController();
+
+    final name = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 8,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Barcode not recognised',
+                style: Theme.of(sheetContext).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Name it to place on ${slot.label}',
+                style: Theme.of(sheetContext).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                  labelText: 'Item name',
+                  hintText: 'e.g. Olive oil',
+                ),
+                onSubmitted: (v) =>
+                    Navigator.pop(sheetContext, v.trim()),
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                onPressed: () =>
+                    Navigator.pop(sheetContext, controller.text.trim()),
+                child: const Text('Place on shelf'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(sheetContext),
+                child: const Text('Skip'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    final householdId = ref.read(householdIdProvider);
+    if (name == null || name.isEmpty || householdId == null) return;
+
+    await ref.read(itemRepositoryProvider).placeInSlot(
+          householdId: householdId,
+          slotId: slot.id,
+          name: name,
+          barcode: barcode,
+        );
+    if (mounted) {
+      setState(() => _placedCount++);
+      _toast('Placed $name on ${slot.label}');
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 1)),
+      );
   }
 
   Future<void> _showKnownItemSheet(Item item) async {
@@ -311,10 +481,21 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Scan'),
+        title: Text(_placingIntoSlot
+            ? 'Scan into ${widget.targetSlot!.label}'
+            : 'Scan'),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         actions: [
+          if (_placingIntoSlot)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(
+                _placedCount > 0 ? 'Done ($_placedCount)' : 'Done',
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.w700),
+              ),
+            ),
           ValueListenableBuilder<MobileScannerState>(
             valueListenable: _controller,
             builder: (context, state, _) {
@@ -367,7 +548,12 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
                 ),
               ),
               child: Text(
-                _status ?? 'Point at a product barcode or shelf QR label',
+                _status ??
+                    (_placingIntoSlot
+                        ? (_placedCount > 0
+                            ? 'Placed $_placedCount · keep scanning to add more'
+                            : 'Scan a product to place it on ${widget.targetSlot!.label}')
+                        : 'Point at a product barcode or shelf QR label'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                     color: Colors.white, fontWeight: FontWeight.w600),

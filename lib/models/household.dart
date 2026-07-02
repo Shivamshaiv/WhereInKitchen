@@ -1,3 +1,20 @@
+/// Scheme used in invite QR codes so a scan can jump straight into joining.
+const String kJoinUriPrefix = 'whereinkitchen://join/';
+
+/// The payload encoded in a household's invite QR code.
+String householdInvitePayload(String householdId) =>
+    '$kJoinUriPrefix$householdId';
+
+/// Extracts a household id from an invite payload (QR content or raw id).
+/// Accepts either the full `whereinkitchen://join/<id>` URI or a bare id.
+String parseHouseholdInvite(String payload) {
+  final trimmed = payload.trim();
+  if (trimmed.startsWith(kJoinUriPrefix)) {
+    return trimmed.substring(kJoinUriPrefix.length);
+  }
+  return trimmed;
+}
+
 class Household {
   const Household({
     required this.id,

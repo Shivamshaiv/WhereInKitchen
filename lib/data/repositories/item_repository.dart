@@ -98,6 +98,29 @@ class ItemRepository {
     ));
   }
 
+  /// Fast path for scan-to-place: add a scanned product straight onto a shelf.
+  Future<Item> placeInSlot({
+    required String householdId,
+    required String slotId,
+    required String name,
+    String category = 'General',
+    String? barcode,
+    String? imageUrl,
+  }) {
+    return addItem(Item(
+      id: '',
+      householdId: householdId,
+      name: name,
+      aliases: const [],
+      category: category,
+      slotId: slotId,
+      quantity: '1',
+      updatedAt: DateTime.now(),
+      barcode: barcode,
+      imageUrl: imageUrl,
+    ));
+  }
+
   Future<void> deleteItems(String householdId, List<String> itemIds) async {
     final batch = _firestore.batch();
     for (final id in itemIds) {
