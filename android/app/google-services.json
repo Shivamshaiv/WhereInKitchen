@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "774926504950",
+    "project_id": "whereinkitchen",
+    "storage_bucket": "whereinkitchen.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:774926504950:android:63c3b36eeb828f25faedd7",
+        "android_client_info": {
+          "package_name": "com.whereinkitchen.wherein_kitchen"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "774926504950-44gu0ihc36n1bs4lsu86tovpa8daisd3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.whereinkitchen.wherein_kitchen",
+            "certificate_hash": "fd3c23a9815bdcbe73cd472452bb314078edb0c8"
+          }
+        },
+        {
+          "client_id": "774926504950-f2d07va69djqe2mp98hn0knjjhjvals0.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA4J_Ny7DDIjZl_WG81bl_yoNAXoJRP_SA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "774926504950-f2d07va69djqe2mp98hn0knjjhjvals0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,34 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isHouseholdMember(householdId) {
+      return isSignedIn()
+        && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+    }
+
+    // Per-user mapping to their household. Enables a direct read at startup
+    // instead of a query, which is far more reliable to secure.
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    match /households/{householdId} {
+      allow read: if isSignedIn()
+        && request.auth.uid in resource.data.members;
+      allow create: if isSignedIn()
+        && request.resource.data.members is list
+        && request.auth.uid in request.resource.data.members;
+      allow update: if isSignedIn()
+        && (request.auth.uid in resource.data.members
+          || request.auth.uid in request.resource.data.members);
+
+      match /{subcollection}/{docId} {
+        allow read, write: if isHouseholdMember(householdId);
+      }
+    }
+  }
+}
