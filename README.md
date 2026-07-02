@@ -71,12 +71,20 @@ flutter build apk --release
 > also manages the camera lifecycle via `WidgetsBindingObserver` so it restarts correctly
 > after the app is minimized/resumed.
 
-## Notes / known behavior
+## Barcode lookup sources
 
-- **"Barcode not found" is normal for non-food items.** Open Food Facts only covers
-  food/grocery products, so household, cosmetic, or hardware barcodes usually won't
-  resolve — the app falls back to a quick manual add. The scanner is still reading the
-  barcode correctly; it just has no product database entry.
+Scanned barcodes are looked up across several **completely free, no-API-key**
+databases (in order), and the first match wins:
+
+1. [Open Food Facts](https://world.openfoodfacts.org/) – groceries / food
+2. [Open Beauty Facts](https://world.openbeautyfacts.org/) – cosmetics / personal care
+3. [Open Products Facts](https://world.openproductsfacts.org/) – general non-food products
+4. [Open Pet Food Facts](https://world.openpetfoodfacts.org/) – pet food
+5. [UPCitemdb](https://www.upcitemdb.com/) (free trial endpoint) – broad retail catalog
+
+If none of them know the barcode, the app falls back to a quick manual add — and the
+barcode is saved with your item, so the next scan recognizes it instantly. See
+`lib/services/product_lookup_service.dart`.
 
 ## Project layout
 

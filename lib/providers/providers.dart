@@ -13,7 +13,7 @@ import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/services/auth_service.dart';
-import 'package:wherein_kitchen/services/open_food_facts_service.dart';
+import 'package:wherein_kitchen/services/product_lookup_service.dart';
 
 final firestoreProvider = Provider<FirebaseFirestore>((ref) {
   return FirebaseFirestore.instance;
@@ -49,8 +49,8 @@ final productRepositoryProvider = Provider<ProductRepository>((ref) {
   return ProductRepository(ref.watch(firestoreProvider));
 });
 
-final openFoodFactsServiceProvider = Provider<OpenFoodFactsService>((ref) {
-  return OpenFoodFactsService();
+final productLookupServiceProvider = Provider<ProductLookupService>((ref) {
+  return ProductLookupService();
 });
 
 final householdIdProvider = StateProvider<String?>((ref) => null);

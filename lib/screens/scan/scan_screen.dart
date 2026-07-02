@@ -124,7 +124,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
         .read(productRepositoryProvider)
         .getProduct(householdId, barcode);
 
-    product ??= await ref.read(openFoodFactsServiceProvider).lookupBarcode(
+    product ??= await ref.read(productLookupServiceProvider).lookupBarcode(
           barcode,
         );
 

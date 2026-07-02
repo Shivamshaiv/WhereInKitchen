@@ -5,6 +5,7 @@ import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/auth/auth_screen.dart';
 import 'package:wherein_kitchen/screens/auth/household_setup_screen.dart';
 import 'package:wherein_kitchen/screens/home/home_screen.dart';
+import 'package:wherein_kitchen/theme.dart';
 
 class WhereInKitchenApp extends ConsumerWidget {
   const WhereInKitchenApp({super.key});
@@ -16,23 +17,8 @@ class WhereInKitchenApp extends ConsumerWidget {
     return MaterialApp(
       title: 'WhereInKitchen',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF2E7D32),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
-        ),
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF66BB6A),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: buildLightTheme(),
+      darkTheme: buildDarkTheme(),
       home: authState.when(
         data: (user) {
           if (user == null) return const AuthScreen();
@@ -46,19 +32,44 @@ class WhereInKitchenApp extends ConsumerWidget {
               }
               return const HomeScreen();
             },
-            loading: () => const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            ),
+            loading: () => const _BrandedSplash(),
             error: (error, _) => Scaffold(
               body: Center(child: Text('Setup error: $error')),
             ),
           );
         },
-        loading: () => const Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+        loading: () => const _BrandedSplash(),
         error: (error, _) => Scaffold(
           body: Center(child: Text('Auth error: $error')),
+        ),
+      ),
+    );
+  }
+}
+
+/// A branded loading screen shown while auth/household state resolves.
+class _BrandedSplash extends StatelessWidget {
+  const _BrandedSplash();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset(
+              'assets/icon/icon.png',
+              width: 120,
+              height: 120,
+            ),
+            const SizedBox(height: 20),
+            const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+          ],
         ),
       ),
     );

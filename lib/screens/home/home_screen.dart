@@ -207,16 +207,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   final roomUnits =
                       unitList.where((u) => u.roomId == room.id).toList();
                   final itemTotal = _itemCountForUnits(roomUnits);
+                  final scheme = Theme.of(context).colorScheme;
                   return Card(
                     clipBehavior: Clip.antiAlias,
+                    margin: const EdgeInsets.only(bottom: 12),
                     child: ListTile(
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 6),
-                      leading: CircleAvatar(
+                          horizontal: 14, vertical: 10),
+                      leading: Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: scheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                         child: Icon(
                           room.name.toLowerCase().contains('kitchen')
                               ? Icons.kitchen
                               : Icons.meeting_room_outlined,
+                          color: scheme.onPrimaryContainer,
                         ),
                       ),
                       title: Text(

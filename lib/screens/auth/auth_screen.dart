@@ -73,26 +73,33 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(
-                    Icons.kitchen,
-                    size: 72,
-                    color: Theme.of(context).colorScheme.primary,
+                  Center(
+                    child: Image.asset(
+                      'assets/icon/icon.png',
+                      width: 128,
+                      height: 128,
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Text(
                     'WhereInKitchen',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
                         ),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     'A visual map of where everything lives',
                     textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurfaceVariant,
+                        ),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 36),
                   TextField(
                     controller: _emailController,
                     keyboardType: TextInputType.emailAddress,
