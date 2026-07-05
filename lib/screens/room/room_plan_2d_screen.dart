@@ -6,6 +6,7 @@ import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/widgets/iso_room_view.dart' show UnitLayout;
+import 'package:wherein_kitchen/widgets/unit_colors.dart';
 
 /// Top-down 2D floor-plan editor.
 ///
@@ -60,6 +61,17 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
       return (gx: unit.gx, gy: unit.gy, gw: unit.gw, gh: unit.gh);
     }
     return (gx: 0, gy: 0, gw: 2, gh: 2);
+  }
+
+  /// A copy of [unit] with any pending, not-yet-synced drag/resize merged in,
+  /// so edits that go through updateUnit (rotate, mount, height) don't overwrite
+  /// an optimistic layout with stale Firestore coordinates. Unplaced units are
+  /// left untouched so their -1 sentinel is preserved.
+  StorageUnit _mergeLocalLayout(StorageUnit unit) {
+    final l = _localLayout[unit.id];
+    return l == null
+        ? unit
+        : unit.copyWith(gx: l.gx, gy: l.gy, gw: l.gw, gh: l.gh);
   }
 
   bool _overlaps(UnitLayout a, UnitLayout b) =>
@@ -126,8 +138,12 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
     // stacked units are both reachable.
     final hits = units.where((u) {
       final l = _layoutOf(u);
-      final rect = Rect.fromLTWH(
+      var rect = Rect.fromLTWH(
           l.gx * _cell, l.gy * _cell, l.gw * _cell, l.gh * _cell);
+      // Match the painter, which insets upper (wall) units so a base unit
+      // beneath them stays tappable at the exposed edge.
+      final isUpper = u.mount.occupiesUpper && !u.mount.occupiesLower;
+      if (isUpper) rect = rect.deflate(_cell * 0.16);
       return rect.contains(local);
     }).toList();
     if (hits.isEmpty) return null;
@@ -224,7 +240,7 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
     if (unit == null) return;
     await ref
         .read(unitRepositoryProvider)
-        .updateUnit(unit.copyWith(facing: (unit.facing + 1) % 4));
+        .updateUnit(_mergeLocalLayout(unit).copyWith(facing: (unit.facing + 1) % 4));
   }
 
   static const List<UnitMount> _mountOrder = [
@@ -240,7 +256,7 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
     if (unit == null) return;
     final idx = _mountOrder.indexOf(unit.mount);
     final next = _mountOrder[(idx + 1) % _mountOrder.length];
-    final updated = unit.copyWith(mount: next);
+    final updated = _mergeLocalLayout(unit).copyWith(mount: next);
     if (_wouldOverlap(updated, _layoutOf(unit), units)) {
       _snack('Another unit already sits at ${next.label} level here');
       return;
@@ -254,7 +270,7 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
     final h = (effectiveHeightCm(unit) + delta).clamp(20, 260);
     await ref
         .read(unitRepositoryProvider)
-        .updateUnit(unit.copyWith(heightCm: h));
+        .updateUnit(_mergeLocalLayout(unit).copyWith(heightCm: h));
   }
 
   void _snack(String message) {
@@ -290,7 +306,13 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
         _selected(_unitsForRoom(unitsAsync.value ?? const []));
 
     return Scaffold(
-      appBar: AppBar(title: Text('${widget.room.name} · 2D plan')),
+      appBar: AppBar(
+        title: Text(
+          '${widget.room.name} · 2D plan',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
       floatingActionButton: selectedGlobal != null
           ? null
           : FloatingActionButton.extended(
@@ -680,22 +702,29 @@ class _RoomPlan2DScreenState extends ConsumerState<RoomPlan2DScreen> {
       type: type,
       rows: rows,
       columns: type.holdsItems ? columns : 1,
-      sortOrder: units.length,
+      sortOrder: units.fold<int>(-1, (m, u) => math.max(m, u.sortOrder)) + 1,
       mount: mount,
       heightCm: heightCm,
     );
     final spot = _findFreeCell(units, gw, gh, mount);
-    final gx = spot?.gx ?? 0;
-    final gy = spot?.gy ?? 0;
-    await unitRepo.updateLayout(householdId, unit.id,
-        gx: gx, gy: gy, gw: gw, gh: gh);
+    // Don't default to (0,0) when the room is full — that stacks this unit on
+    // top of an existing one. Leave it unplaced instead.
+    if (spot != null) {
+      await unitRepo.updateLayout(householdId, unit.id,
+          gx: spot.gx, gy: spot.gy, gw: gw, gh: gh);
+    }
     await slotRepo.ensureSlotsForUnit(householdId: householdId, unit: unit);
 
     if (!mounted) return;
     setState(() {
       _selectedUnitId = unit.id;
-      _localLayout[unit.id] = (gx: gx, gy: gy, gw: gw, gh: gh);
+      if (spot != null) {
+        _localLayout[unit.id] = (gx: spot.gx, gy: spot.gy, gw: gw, gh: gh);
+      }
     });
+    if (spot == null) {
+      _snack('$name added, but the room is full — move or remove a unit');
+    }
   }
 
   Future<void> _saveEdits(StorageUnit unit, String name, StorageUnitType type,
@@ -803,20 +832,7 @@ class _Plan2DPainter extends CustomPainter {
   final ColorScheme scheme;
 
   Color _baseColor(StorageUnitType type) {
-    final seed = switch (type) {
-      StorageUnitType.shelf => const Color(0xFF8D6E63),
-      StorageUnitType.drawer => const Color(0xFF78909C),
-      StorageUnitType.cabinet => const Color(0xFFA1887F),
-      StorageUnitType.fridge => const Color(0xFF90A4AE),
-      StorageUnitType.freezer => const Color(0xFF81D4FA),
-      StorageUnitType.range => const Color(0xFF546E7A),
-      StorageUnitType.sink => const Color(0xFFB0BEC5),
-      StorageUnitType.dishwasher => const Color(0xFF9E9E9E),
-      StorageUnitType.oven => const Color(0xFF607D8B),
-      StorageUnitType.gap => const Color(0xFF6D6D6D),
-      StorageUnitType.other => const Color(0xFF9E9E9E),
-    };
-    return Color.lerp(seed, scheme.surfaceContainerHighest, 0.15)!;
+    return unitBaseColor(type, scheme);
   }
 
   @override

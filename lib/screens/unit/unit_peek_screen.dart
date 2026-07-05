@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -53,9 +54,15 @@ class _UnitPeekScreenState extends ConsumerState<UnitPeekScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(unit.name),
+            Text(
+              unit.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
             Text(
               '${unit.mount.label} · ${unit.type.label}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
@@ -84,7 +91,10 @@ class _UnitPeekScreenState extends ConsumerState<UnitPeekScreen> {
           for (final s in slots) {
             (rows[s.row] ??= []).add(s);
           }
-          final rowNumbers = rows.keys.toList()..sort((a, b) => b.compareTo(a));
+          // Row 1 at the top, matching ShelfMap (used by the full unit view,
+          // shelf pickers, and search) so a shelf never changes position
+          // depending on how the unit was opened.
+          final rowNumbers = rows.keys.toList()..sort((a, b) => a.compareTo(b));
 
           return Padding(
             padding: const EdgeInsets.all(16),
@@ -275,6 +285,11 @@ class _ItemChip extends StatelessWidget {
 
   final Item item;
 
+  // Cache decoded thumbnails keyed by their base64 string so base64Decode is
+  // not re-run on every rebuild (the peek screen rebuilds whenever itemsProvider
+  // updates, redrawing every preview chip).
+  static final Map<String, Uint8List> _thumbCache = {};
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -282,9 +297,10 @@ class _ItemChip extends StatelessWidget {
     final thumb = item.thumbB64;
     if (thumb != null && thumb.isNotEmpty) {
       try {
+        final bytes = _thumbCache[thumb] ??= base64Decode(thumb);
         avatar = ClipOval(
           child: Image.memory(
-            base64Decode(thumb),
+            bytes,
             width: 22,
             height: 22,
             fit: BoxFit.cover,

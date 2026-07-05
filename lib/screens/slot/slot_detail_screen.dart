@@ -37,10 +37,13 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
   }
 
   Future<void> _quickAdd() async {
+    if (_adding) return;
     final name = _quickAddController.text.trim();
     if (name.isEmpty) return;
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
+
+    final messenger = ScaffoldMessenger.of(context);
 
     setState(() => _adding = true);
     _quickAddController.clear();
@@ -53,6 +56,14 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
             slotId: widget.slot.id,
             name: name,
           );
+    } catch (_) {
+      // Restore the text so the user doesn't lose their input.
+      _quickAddController.text = name;
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text("Couldn't save — check your connection and try again."),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _adding = false);
     }
@@ -99,12 +110,21 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
     );
 
     if (newName != null && newName.isNotEmpty) {
-      await ref
-          .read(slotRepositoryProvider)
-          .renameSlot(householdId, widget.slot.id, newName);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        await ref
+            .read(slotRepositoryProvider)
+            .renameSlot(householdId, widget.slot.id, newName);
+        messenger.showSnackBar(
           SnackBar(content: Text('Renamed to $newName')),
+        );
+      } catch (_) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content:
+                Text("Couldn't save — check your connection and try again."),
+          ),
         );
       }
     }
@@ -138,13 +158,20 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
 
-    await ref
-        .read(itemRepositoryProvider)
-        .deleteItems(householdId, items.map((i) => i.id).toList());
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref
+          .read(itemRepositoryProvider)
+          .deleteItems(householdId, items.map((i) => i.id).toList());
+      messenger.showSnackBar(
         const SnackBar(content: Text('Shelf cleared')),
+      );
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text("Couldn't save — check your connection and try again."),
+        ),
       );
     }
   }
@@ -153,20 +180,30 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
     final repo = ref.read(itemRepositoryProvider);
-    await repo.deleteItem(householdId, item.id);
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(
-        SnackBar(
-          content: Text('Removed ${item.name}'),
-          action: SnackBarAction(
-            label: 'Undo',
-            onPressed: () => repo.addItem(item),
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await repo.deleteItem(householdId, item.id);
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('Removed ${item.name}'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () => repo.addItem(item),
+            ),
           ),
-        ),
-      );
+        );
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content:
+                Text("Couldn't save — check your connection and try again."),
+          ),
+        );
+    }
   }
 
   @override
@@ -176,7 +213,11 @@ class _SlotDetailScreenState extends ConsumerState<SlotDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('${widget.unit.name} · ${widget.slot.label}'),
+        title: Text(
+          '${widget.unit.name} · ${widget.slot.label}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           PopupMenuButton<String>(
             onSelected: (value) {

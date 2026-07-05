@@ -4,6 +4,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
+import 'package:wherein_kitchen/widgets/empty_state.dart';
 
 class QrLabelScreen extends ConsumerWidget {
   const QrLabelScreen({
@@ -24,7 +25,13 @@ class QrLabelScreen extends ConsumerWidget {
     }
 
     return Scaffold(
-      appBar: AppBar(title: Text('${unit.name} QR labels')),
+      appBar: AppBar(
+        title: Text(
+          '${unit.name} QR labels',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
       body: householdId == null
           ? const Center(child: CircularProgressIndicator())
           : StreamBuilder<List<Slot>>(
@@ -32,9 +39,19 @@ class QrLabelScreen extends ConsumerWidget {
                   .read(slotRepositoryProvider)
                   .watchSlotsForUnit(householdId, unit.id),
               builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Center(child: Text('Error: ${snapshot.error}'));
+                }
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
                 final slots = snapshot.data ?? [];
                 if (slots.isEmpty) {
-                  return const Center(child: CircularProgressIndicator());
+                  return const EmptyState(
+                    icon: Icons.shelves,
+                    title: 'No shelves to label',
+                    subtitle: 'This unit has no shelves to print QR codes for.',
+                  );
                 }
 
                 return ListView.builder(
@@ -67,7 +84,13 @@ class QrLabelScreen extends ConsumerWidget {
     final payload = _payloadForSlot(slot.id);
 
     return Scaffold(
-      appBar: AppBar(title: Text('${unit.name} · ${slot.label}')),
+      appBar: AppBar(
+        title: Text(
+          '${unit.name} · ${slot.label}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),

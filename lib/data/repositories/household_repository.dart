@@ -75,8 +75,18 @@ class HouseholdRepository {
       name: name,
       members: [ownerUid],
       createdAt: DateTime.now(),
+      ownerUid: ownerUid,
     );
-    await _collection.doc(id).set(household.toMap());
+    // Create-if-absent so a (astronomically unlikely) id reuse can never
+    // overwrite an existing home's members.
+    final ref = _collection.doc(id);
+    await _firestore.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      if (snap.exists) {
+        throw StateError('A home with this id already exists.');
+      }
+      tx.set(ref, household.toMap());
+    });
     await _linkUserToHousehold(ownerUid, id);
     return household;
   }
@@ -86,6 +96,26 @@ class HouseholdRepository {
       'members': FieldValue.arrayUnion([uid]),
     });
     await _linkUserToHousehold(uid, householdId);
+  }
+
+  /// The current user leaves [householdId] (removes only their own uid). Clears
+  /// the active-home pointer if it pointed here so startup re-resolves cleanly.
+  Future<void> leaveHousehold(String uid, String householdId) async {
+    await _collection.doc(householdId).update({
+      'members': FieldValue.arrayRemove([uid]),
+    });
+    final active = await getUserHousehold(uid);
+    if (active == householdId) {
+      await _users.doc(uid).set({'householdId': null});
+    }
+  }
+
+  /// Owner-only: remove another member. Authorized by the security rules
+  /// (only the household's ownerUid may remove someone other than themselves).
+  Future<void> removeMember(String householdId, String uid) async {
+    await _collection.doc(householdId).update({
+      'members': FieldValue.arrayRemove([uid]),
+    });
   }
 
   Future<String?> findHouseholdForUser(String uid) async {

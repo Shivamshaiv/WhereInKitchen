@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wherein_kitchen/data/repositories/household_repository.dart';
 import 'package:wherein_kitchen/data/repositories/item_repository.dart';
 import 'package:wherein_kitchen/data/repositories/product_repository.dart';
@@ -8,6 +10,8 @@ import 'package:wherein_kitchen/data/repositories/room_repository.dart';
 import 'package:wherein_kitchen/data/repositories/slot_repository.dart';
 import 'package:wherein_kitchen/data/repositories/unit_repository.dart';
 import 'package:wherein_kitchen/models/household.dart';
+import 'package:wherein_kitchen/models/elevation.dart';
+import 'package:wherein_kitchen/models/measure.dart';
 import 'package:wherein_kitchen/models/item.dart';
 import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/slot.dart';
@@ -119,7 +123,7 @@ final highlightSlotIdProvider = StateProvider<String?>((ref) => null);
 final highlightItemNameProvider = StateProvider<String?>((ref) => null);
 
 final slotsForUnitProvider =
-    StreamProvider.family<List<Slot>, String>((ref, unitId) {
+    StreamProvider.autoDispose.family<List<Slot>, String>((ref, unitId) {
   final householdId = ref.watch(householdIdProvider);
   if (householdId == null) return const Stream.empty();
   return ref
@@ -128,10 +132,133 @@ final slotsForUnitProvider =
 });
 
 final itemsForSlotProvider =
-    StreamProvider.family<List<Item>, String>((ref, slotId) {
+    StreamProvider.autoDispose.family<List<Item>, String>((ref, slotId) {
   final householdId = ref.watch(householdIdProvider);
   if (householdId == null) return const Stream.empty();
   return ref
       .watch(itemRepositoryProvider)
       .watchItemsForSlot(householdId, slotId);
 });
+
+/// An immutable snapshot of a unit's shape, copied in the wall-elevation editor
+/// so it can be pasted onto any surface (persists across pushed editor routes).
+/// Deliberately holds only geometry/config — never items — so paste creates a
+/// fresh empty unit rather than duplicating inventory.
+class ElevClipboard {
+  const ElevClipboard({
+    required this.name,
+    required this.type,
+    required this.mount,
+    required this.rows,
+    required this.columns,
+    required this.heightCm,
+    required this.widthCm,
+    required this.hCm,
+    required this.depthCm,
+    required this.zCm,
+  });
+
+  final String name;
+  final StorageUnitType type;
+  final UnitMount mount;
+  final int rows;
+  final int columns;
+  final int heightCm;
+  final double widthCm;
+  final double hCm;
+  final double depthCm;
+  final double zCm;
+}
+
+final elevationClipboardProvider = StateProvider<ElevClipboard?>((ref) => null);
+
+/// The user's chosen measurement units (cm vs feet & inches), persisted on the
+/// device. All lengths are stored in cm; this only affects display/entry.
+class UnitSystemNotifier extends StateNotifier<UnitSystem> {
+  UnitSystemNotifier() : super(UnitSystem.metric) {
+    _load();
+  }
+
+  static const _key = 'unit_system_v1';
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString(_key) == 'imperial') state = UnitSystem.imperial;
+  }
+
+  Future<void> setSystem(UnitSystem system) async {
+    state = system;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_key, system.isMetric ? 'metric' : 'imperial');
+  }
+}
+
+final unitSystemProvider =
+    StateNotifierProvider<UnitSystemNotifier, UnitSystem>(
+        (ref) => UnitSystemNotifier());
+
+/// App theme mode (System / Light / Dark), persisted on the device.
+class ThemeModeNotifier extends StateNotifier<ThemeMode> {
+  ThemeModeNotifier() : super(ThemeMode.system) {
+    _load();
+  }
+
+  static const _key = 'theme_mode_v1';
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    switch (prefs.getString(_key)) {
+      case 'light':
+        state = ThemeMode.light;
+      case 'dark':
+        state = ThemeMode.dark;
+    }
+  }
+
+  Future<void> setMode(ThemeMode mode) async {
+    state = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _key,
+      switch (mode) {
+        ThemeMode.light => 'light',
+        ThemeMode.dark => 'dark',
+        ThemeMode.system => 'system',
+      },
+    );
+  }
+}
+
+final themeModeProvider = StateNotifierProvider<ThemeModeNotifier, ThemeMode>(
+    (ref) => ThemeModeNotifier());
+
+/// A single double preference persisted in SharedPreferences under [_key].
+class DoublePrefNotifier extends StateNotifier<double> {
+  DoublePrefNotifier(this._key, double initial) : super(initial) {
+    _load();
+  }
+
+  final String _key;
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getDouble(_key);
+    if (v != null) state = v;
+  }
+
+  Future<void> set(double value) async {
+    state = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_key, value);
+  }
+}
+
+/// Counter-top height (cm): the wall-editor guideline + a snap target.
+final counterHeightProvider = StateNotifierProvider<DoublePrefNotifier, double>(
+    (ref) => DoublePrefNotifier('counter_height_cm_v1', kCounterHeightCm));
+
+/// Height (cm) where wall/upper cabinets are mounted: editor guideline + snap,
+/// and the default z for a newly-added wall unit.
+final wallCabinetHeightProvider =
+    StateNotifierProvider<DoublePrefNotifier, double>(
+        (ref) => DoublePrefNotifier('wall_cabinet_cm_v1', kWallUnitBaseCm));

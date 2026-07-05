@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:wherein_kitchen/models/item.dart';
@@ -12,6 +13,10 @@ class ItemListTile extends StatelessWidget {
     this.trailing,
   });
 
+  // Cache of decoded thumbnails keyed by their base64 string, so that
+  // base64Decode does not run on every build()/scroll recycle.
+  static final Map<String, Uint8List> _thumbCache = <String, Uint8List>{};
+
   final Item item;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
@@ -24,7 +29,8 @@ class ItemListTile extends StatelessWidget {
       leading = ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: Image.memory(
-          base64Decode(item.thumbB64!),
+          _thumbCache[item.thumbB64!] ??=
+              base64Decode(item.thumbB64!),
           width: 48,
           height: 48,
           fit: BoxFit.cover,

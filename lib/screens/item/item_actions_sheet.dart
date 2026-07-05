@@ -5,7 +5,7 @@ import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/search/search_result_screen.dart';
-import 'package:wherein_kitchen/widgets/shelf_map.dart';
+import 'package:wherein_kitchen/widgets/interior/unit_interior.dart';
 
 Future<void> showItemActionsSheet({
   required BuildContext context,
@@ -49,14 +49,32 @@ Future<void> showItemActionsSheet({
               leading: const Icon(Icons.remove_circle_outline),
               title: const Text('Mark as used up'),
               onTap: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final repo = ref.read(itemRepositoryProvider);
                 Navigator.pop(context);
-                await ref
-                    .read(itemRepositoryProvider)
-                    .deleteItem(item.householdId, item.id);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Removed ${item.name}')),
-                  );
+                try {
+                  await repo.deleteItem(item.householdId, item.id);
+                  messenger
+                    ..clearSnackBars()
+                    ..showSnackBar(
+                      SnackBar(
+                        content: Text('Marked ${item.name} as used up'),
+                        action: SnackBarAction(
+                          label: 'Undo',
+                          onPressed: () => repo.addItem(item),
+                        ),
+                      ),
+                    );
+                } catch (_) {
+                  messenger
+                    ..clearSnackBars()
+                    ..showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          "Couldn't save — check your connection and try again.",
+                        ),
+                      ),
+                    );
                 }
               },
             ),
@@ -70,10 +88,33 @@ Future<void> showItemActionsSheet({
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
               onTap: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final repo = ref.read(itemRepositoryProvider);
                 Navigator.pop(context);
-                await ref
-                    .read(itemRepositoryProvider)
-                    .deleteItem(item.householdId, item.id);
+                try {
+                  await repo.deleteItem(item.householdId, item.id);
+                  messenger
+                    ..clearSnackBars()
+                    ..showSnackBar(
+                      SnackBar(
+                        content: Text('Deleted ${item.name}'),
+                        action: SnackBarAction(
+                          label: 'Undo',
+                          onPressed: () => repo.addItem(item),
+                        ),
+                      ),
+                    );
+                } catch (_) {
+                  messenger
+                    ..clearSnackBars()
+                    ..showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          "Couldn't save — check your connection and try again.",
+                        ),
+                      ),
+                    );
+                }
               },
             ),
           ],
@@ -120,13 +161,18 @@ Future<void> _moveItem(
                     const SizedBox(height: 12),
                     DropdownButtonFormField<StorageUnit>(
                       initialValue: unit,
+                      isExpanded: true,
                       decoration:
                           const InputDecoration(labelText: 'Storage unit'),
                       items: units
                           .map(
                             (u) => DropdownMenuItem(
                               value: u,
-                              child: Text(u.name),
+                              child: Text(
+                                u.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           )
                           .toList(),
@@ -145,7 +191,7 @@ Future<void> _moveItem(
                             .watchSlotsForUnit(householdId, unit.id),
                         builder: (context, snapshot) {
                           final slots = snapshot.data ?? [];
-                          return ShelfMap(
+                          return UnitInterior(
                             unit: unit,
                             slots: slots,
                             itemCountBySlot: const {},
@@ -162,14 +208,28 @@ Future<void> _moveItem(
                       onPressed: selectedSlotId == null
                           ? null
                           : () async {
-                              await ref.read(itemRepositoryProvider).moveItem(
-                                    item: item,
-                                    newSlotId: selectedSlotId!,
-                                  );
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Item moved')),
+                              final messenger = ScaffoldMessenger.of(context);
+                              final navigator = Navigator.of(context);
+                              try {
+                                await ref
+                                    .read(itemRepositoryProvider)
+                                    .moveItem(
+                                      item: item,
+                                      newSlotId: selectedSlotId!,
+                                    );
+                                navigator.pop();
+                                messenger.showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Item moved'),
+                                  ),
+                                );
+                              } catch (_) {
+                                messenger.showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      "Couldn't save — check your connection and try again.",
+                                    ),
+                                  ),
                                 );
                               }
                             },

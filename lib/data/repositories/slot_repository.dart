@@ -59,23 +59,18 @@ class SlotRepository {
     final batch = _firestore.batch();
     final slots = <Slot>[];
 
-    for (var row = 1; row <= unit.rows; row++) {
-      for (var col = 1; col <= unit.columns; col++) {
-        final doc = _collection(householdId).doc();
-        final label = unit.columns == 1
-            ? 'Shelf $row'
-            : 'Row $row · Col $col';
-        final slot = Slot(
-          id: doc.id,
-          householdId: householdId,
-          unitId: unit.id,
-          label: label,
-          row: row,
-          column: col,
-        );
-        batch.set(doc, slot.toMap());
-        slots.add(slot);
-      }
+    for (final comp in defaultCompartments(unit)) {
+      final doc = _collection(householdId).doc();
+      final slot = Slot(
+        id: doc.id,
+        householdId: householdId,
+        unitId: unit.id,
+        label: comp.label,
+        row: comp.row,
+        column: comp.column,
+      );
+      batch.set(doc, slot.toMap());
+      slots.add(slot);
     }
 
     await batch.commit();
@@ -114,36 +109,43 @@ class SlotRepository {
     final batch = _firestore.batch();
     final wanted = <String>{};
 
-    for (var row = 1; row <= unit.rows; row++) {
-      for (var col = 1; col <= unit.columns; col++) {
-        final key = '${row}_$col';
-        wanted.add(key);
-        if (!byPosition.containsKey(key)) {
-          final doc = _collection(householdId).doc();
-          final label =
-              unit.columns == 1 ? 'Shelf $row' : 'Row $row · Col $col';
-          batch.set(
-            doc,
-            Slot(
-              id: doc.id,
-              householdId: householdId,
-              unitId: unit.id,
-              label: label,
-              row: row,
-              column: col,
-            ).toMap(),
-          );
-        }
-      }
-    }
-
-    for (final entry in byPosition.entries) {
-      if (!wanted.contains(entry.key)) {
-        batch.delete(entry.value.reference);
+    for (final comp in defaultCompartments(unit)) {
+      final key = '${comp.row}_${comp.column}';
+      wanted.add(key);
+      if (!byPosition.containsKey(key)) {
+        final doc = _collection(householdId).doc();
+        batch.set(
+          doc,
+          Slot(
+            id: doc.id,
+            householdId: householdId,
+            unitId: unit.id,
+            label: comp.label,
+            row: comp.row,
+            column: comp.column,
+          ).toMap(),
+        );
       }
     }
 
     await batch.commit();
+
+    // Remove now-out-of-range slots that are empty. Check-and-delete each one
+    // immediately (instead of staging into a batch committed later) so the
+    // window between the empty-check and the delete is as small as possible —
+    // a populated slot is never destroyed, while shrinking rows/columns still
+    // tidies away the empty extras.
+    for (final entry in byPosition.entries) {
+      if (wanted.contains(entry.key)) continue;
+      final itemsSnap = await _firestore
+          .collection(FirestorePaths.items(householdId))
+          .where('slotId', isEqualTo: entry.value.id)
+          .limit(1)
+          .get();
+      if (itemsSnap.docs.isEmpty) {
+        await entry.value.reference.delete();
+      }
+    }
   }
 
   Future<void> renameSlot(

@@ -2,11 +2,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wherein_kitchen/models/elevation.dart';
 import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/room/room_3d_screen.dart';
 import 'package:wherein_kitchen/screens/room/room_plan_2d_screen.dart';
+import 'package:wherein_kitchen/screens/room/wall_elevation_screen.dart';
 import 'package:wherein_kitchen/screens/unit/unit_peek_screen.dart';
 import 'package:wherein_kitchen/screens/unit/unit_view_screen.dart';
 import 'package:wherein_kitchen/widgets/iso_room_view.dart';
@@ -75,6 +77,17 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
       return (gx: unit.gx, gy: unit.gy, gw: unit.gw, gh: unit.gh);
     }
     return (gx: 0, gy: 0, gw: 2, gh: 2);
+  }
+
+  /// A copy of [unit] with any pending, not-yet-synced drag merged in, so a
+  /// toolbar edit that goes through updateUnit (shelves, height, level, rotate)
+  /// doesn't overwrite an optimistic move with stale Firestore coordinates.
+  /// Unplaced units are left untouched so their -1 sentinel is preserved.
+  StorageUnit _mergeLocalLayout(StorageUnit unit) {
+    final l = _localLayout[unit.id];
+    return l == null
+        ? unit
+        : unit.copyWith(gx: l.gx, gy: l.gy, gw: l.gw, gh: l.gh);
   }
 
   bool _overlaps(UnitLayout a, UnitLayout b) {
@@ -189,6 +202,7 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
         gw: layout.gw,
         gh: layout.gh,
       );
+      if (!mounted) return;
       placed.add(unit);
     }
   }
@@ -234,7 +248,7 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
 
-    final updated = unit.copyWith(rows: rows);
+    final updated = _mergeLocalLayout(unit).copyWith(rows: rows);
     await ref.read(unitRepositoryProvider).updateUnit(updated);
     await ref.read(slotRepositoryProvider).reconcileSlotsForUnit(
           householdId: householdId,
@@ -251,7 +265,7 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
     if (h == effectiveHeightCm(unit)) return;
     await ref
         .read(unitRepositoryProvider)
-        .updateUnit(unit.copyWith(heightCm: h));
+        .updateUnit(_mergeLocalLayout(unit).copyWith(heightCm: h));
     if (mounted) setState(() {});
   }
 
@@ -333,7 +347,7 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
     final nidx = (idx + delta).clamp(0, _mountOrder.length - 1);
     if (nidx == idx) return;
 
-    final updated = unit.copyWith(mount: _mountOrder[nidx]);
+    final updated = _mergeLocalLayout(unit).copyWith(mount: _mountOrder[nidx]);
     if (_layoutWouldOverlap(updated, _layoutOf(unit), units)) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -357,7 +371,8 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
   Future<void> _rotateSelected(List<StorageUnit> units, int delta) async {
     final unit = _selectedUnit(units);
     if (unit == null) return;
-    final updated = unit.copyWith(facing: (unit.facing + delta + 4) % 4);
+    final updated =
+        _mergeLocalLayout(unit).copyWith(facing: (unit.facing + delta + 4) % 4);
     await ref.read(unitRepositoryProvider).updateUnit(updated);
     if (mounted) {
       ScaffoldMessenger.of(context)
@@ -410,6 +425,73 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
     );
   }
 
+  /// Beta entry to the new wall-elevation designer: migrates this room's units
+  /// into the surface model (idempotent) then lets you pick a surface to edit.
+  Future<void> _openWallDesigner() async {
+    final hh = ref.read(householdIdProvider);
+    if (hh == null) return;
+    final all = ref.read(unitsProvider).value ?? [];
+    final units = _unitsForRoom(all);
+    await ref.read(unitRepositoryProvider).migrateRoomToElevation(
+          householdId: hh,
+          room: widget.room,
+          unitsInRoom: units,
+        );
+    if (!mounted) return;
+
+    int countOn(String surfaceId) =>
+        all.where((u) => u.surfaceId == surfaceId).length;
+
+    final surfaces = <({String id, String label})>[
+      for (final w in WallSide.values)
+        (id: wallSurfaceId(w), label: w.label),
+      for (final island in widget.room.islands)
+        for (final f in WallSide.values)
+          (
+            id: islandSurfaceId(island.id, f),
+            label: 'Island · ${f.label}'
+          ),
+    ];
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Design a surface',
+                    style: Theme.of(sheetContext).textTheme.titleMedium),
+              ),
+            ),
+            for (final s in surfaces)
+              ListTile(
+                leading: const Icon(Icons.square_outlined),
+                title: Text(s.label),
+                subtitle: Text('${countOn(s.id)} units'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => WallElevationScreen(
+                        room: widget.room,
+                        surfaceId: s.id,
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final unitsAsync = ref.watch(unitsProvider);
@@ -427,8 +509,17 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.room.name),
+        title: Text(
+          widget.room.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
+          IconButton(
+            tooltip: 'Wall designer (beta)',
+            icon: const Icon(Icons.dashboard_customize_outlined),
+            onPressed: _openWallDesigner,
+          ),
           IconButton(
             tooltip: '2D floor plan',
             icon: const Icon(Icons.grid_on_outlined),
@@ -887,36 +978,41 @@ class _RoomLayoutScreenState extends ConsumerState<RoomLayoutScreen> {
       type: type,
       rows: rows,
       columns: type.holdsItems ? columns : 1,
-      sortOrder: units.length,
+      sortOrder: units.fold<int>(-1, (m, u) => math.max(m, u.sortOrder)) + 1,
       mount: mount,
       heightCm: heightCm,
     );
 
     final spot = _findFreeCell(units, gw, gh, mount);
-    final gx = spot?.gx ?? 0;
-    final gy = spot?.gy ?? 0;
-
-    await unitRepo.updateLayout(
-      householdId,
-      unit.id,
-      gx: gx,
-      gy: gy,
-      gw: gw,
-      gh: gh,
-    );
+    // Only persist a position when a free cell was actually found. Defaulting
+    // to (0,0) would silently stack this unit on top of an existing one.
+    if (spot != null) {
+      await unitRepo.updateLayout(
+        householdId,
+        unit.id,
+        gx: spot.gx,
+        gy: spot.gy,
+        gw: gw,
+        gh: gh,
+      );
+    }
     await slotRepo.ensureSlotsForUnit(householdId: householdId, unit: unit);
 
-    final placed = unit.copyWith(gx: gx, gy: gy, gw: gw, gh: gh);
+    final placed = spot != null
+        ? unit.copyWith(gx: spot.gx, gy: spot.gy, gw: gw, gh: gh)
+        : unit;
 
     if (!mounted) return;
     setState(() {
       _editMode = true;
       _selectedUnitId = unit.id;
-      _localLayout[unit.id] = (gx: gx, gy: gy, gw: gw, gh: gh);
+      if (spot != null) {
+        _localLayout[unit.id] = (gx: spot.gx, gy: spot.gy, gw: gw, gh: gh);
+      }
     });
 
     final message = spot == null
-        ? '$name added — room is crowded, zoom out to find it'
+        ? '$name added, but the room is full — move or remove a unit to place it'
         : (unit.holdsItems
             ? '$name added — drag it into place'
             : '$name added');

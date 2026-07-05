@@ -5,7 +5,9 @@ import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
-import 'package:wherein_kitchen/screens/unit/unit_view_screen.dart';
+import 'package:wherein_kitchen/screens/room/room_3d_screen.dart';
+import 'package:wherein_kitchen/screens/slot/slot_detail_screen.dart';
+import 'package:wherein_kitchen/widgets/interior/unit_interior.dart';
 
 class SearchResultScreen extends ConsumerStatefulWidget {
   const SearchResultScreen({super.key, required this.item});
@@ -80,9 +82,16 @@ class _SearchResultScreenState extends ConsumerState<SearchResultScreen>
     final householdId = ref.watch(householdIdProvider);
     final slots = ref.watch(slotsProvider).value ?? [];
     final units = ref.watch(unitsProvider).value ?? [];
+    final allItems = ref.watch(itemsProvider).value ?? [];
+
+    // Re-derive the item from the live stream so a move/rename made after this
+    // screen opened is reflected — otherwise we'd keep highlighting the shelf it
+    // used to be on. Fall back to the passed snapshot until the stream loads.
+    final item = allItems.firstWhere((i) => i.id == widget.item.id,
+        orElse: () => widget.item);
 
     final slot = slots.cast<Slot?>().firstWhere(
-          (s) => s?.id == widget.item.slotId,
+          (s) => s?.id == item.slotId,
           orElse: () => null,
         );
     final unit = slot == null
@@ -92,8 +101,30 @@ class _SearchResultScreenState extends ConsumerState<SearchResultScreen>
               orElse: () => null,
             );
 
+    final rooms = ref.watch(roomsProvider).value ?? [];
+    final unitRoom = unit == null
+        ? null
+        : rooms.cast<Room?>().firstWhere(
+              (r) => r?.id == unit.roomId,
+              orElse: () => null,
+            );
+
+    final unitSlots = unit == null
+        ? const <Slot>[]
+        : (slots.where((s) => s.unitId == unit.id).toList()
+          ..sort((a, b) {
+            final r = a.row.compareTo(b.row);
+            return r != 0 ? r : a.column.compareTo(b.column);
+          }));
+    final itemCountBySlot = <String, int>{};
+    final itemsBySlot = <String, List<Item>>{};
+    for (final it in allItems) {
+      itemCountBySlot[it.slotId] = (itemCountBySlot[it.slotId] ?? 0) + 1;
+      (itemsBySlot[it.slotId] ??= []).add(it);
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.item.name)),
+      appBar: AppBar(title: Text(item.name)),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -106,7 +137,7 @@ class _SearchResultScreenState extends ConsumerState<SearchResultScreen>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.item.name,
+                      item.name,
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                     const SizedBox(height: 8),
@@ -117,11 +148,29 @@ class _SearchResultScreenState extends ConsumerState<SearchResultScreen>
                               color: Theme.of(context).colorScheme.primary,
                             ),
                       ),
-                    if (widget.item.aliases.isNotEmpty) ...[
+                    if (item.aliases.isNotEmpty) ...[
                       const SizedBox(height: 8),
                       Text(
-                        'Also: ${widget.item.aliases.join(', ')}',
+                        'Also: ${item.aliases.join(', ')}',
                         style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                    if (unit != null && unitRoom != null) ...[
+                      const SizedBox(height: 12),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: FilledButton.tonalIcon(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => Room3DScreen(
+                                room: unitRoom,
+                                focusUnitId: unit.id,
+                              ),
+                            ),
+                          ),
+                          icon: const Icon(Icons.threed_rotation),
+                          label: const Text('See it in 3D'),
+                        ),
                       ),
                     ],
                   ],
@@ -148,10 +197,21 @@ class _SearchResultScreenState extends ConsumerState<SearchResultScreen>
                               curve: Curves.easeOutBack,
                             ),
                           ),
-                          child: UnitViewScreen(
+                          child: UnitInterior(
                             unit: unit,
+                            slots: unitSlots,
+                            itemCountBySlot: itemCountBySlot,
+                            itemsBySlot: itemsBySlot,
                             highlightSlotId: slot.id,
-                            highlightItemName: widget.item.name,
+                            highlightItemName: item.name,
+                            onSlotTap: (s) {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      SlotDetailScreen(unit: unit, slot: s),
+                                ),
+                              );
+                            },
                           ),
                         ),
                       )

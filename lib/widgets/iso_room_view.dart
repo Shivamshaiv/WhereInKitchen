@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
+import 'package:wherein_kitchen/widgets/unit_colors.dart';
 
 /// Layout rectangle of a unit on the room grid.
 typedef UnitLayout = ({int gx, int gy, int gw, int gh});
@@ -78,20 +79,7 @@ class _IsoRoomViewState extends State<IsoRoomView> {
   double _grabDy = 0;
 
   Color _baseColor(StorageUnitType type, ColorScheme scheme) {
-    final seed = switch (type) {
-      StorageUnitType.shelf => const Color(0xFF8D6E63),
-      StorageUnitType.drawer => const Color(0xFF78909C),
-      StorageUnitType.cabinet => const Color(0xFFA1887F),
-      StorageUnitType.fridge => const Color(0xFF90A4AE),
-      StorageUnitType.freezer => const Color(0xFF81D4FA),
-      StorageUnitType.range => const Color(0xFF546E7A),
-      StorageUnitType.sink => const Color(0xFFB0BEC5),
-      StorageUnitType.dishwasher => const Color(0xFF9E9E9E),
-      StorageUnitType.oven => const Color(0xFF607D8B),
-      StorageUnitType.gap => const Color(0xFF6D6D6D),
-      StorageUnitType.other => const Color(0xFF9E9E9E),
-    };
-    return Color.lerp(seed, scheme.surfaceContainerHighest, 0.25)!;
+    return unitBaseColor(type, scheme);
   }
 
   @override
@@ -534,7 +522,19 @@ class _IsoRoomPainter extends CustomPainter {
       ..strokeWidth = 1.2
       ..color = Colors.black.withValues(alpha: 0.25);
 
+    // Draw hardware on the same visible face as the shelves: the right (+x)
+    // face for facing==1, otherwise the front (+y) face. Without this, a
+    // right-facing unit shows its handle/door split on a different face than
+    // its shelves.
+    final onRightFace = unit.facing % 4 == 1;
     Offset lerpFront(double t, double z) {
+      if (onRightFace) {
+        final a = geometry.project(
+            (layout.gx + layout.gw).toDouble(), layout.gy.toDouble(), z);
+        final b = geometry.project((layout.gx + layout.gw).toDouble(),
+            (layout.gy + layout.gh).toDouble(), z);
+        return Offset.lerp(a, b, t)!;
+      }
       final a = geometry.project(
           layout.gx.toDouble(), (layout.gy + layout.gh).toDouble(), z);
       final b = geometry.project((layout.gx + layout.gw).toDouble(),

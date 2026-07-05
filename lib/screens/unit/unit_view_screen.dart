@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wherein_kitchen/models/item.dart';
 import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/qr/qr_label_screen.dart';
 import 'package:wherein_kitchen/screens/slot/slot_detail_screen.dart';
 import 'package:wherein_kitchen/widgets/empty_state.dart';
-import 'package:wherein_kitchen/widgets/shelf_map.dart';
+import 'package:wherein_kitchen/widgets/interior/unit_interior.dart';
 
 class UnitViewScreen extends ConsumerStatefulWidget {
   const UnitViewScreen({
@@ -34,7 +35,10 @@ class _UnitViewScreenState extends ConsumerState<UnitViewScreen> {
   Future<void> _ensureSlots() async {
     final householdId = ref.read(householdIdProvider);
     if (householdId == null) return;
-    await ref.read(slotRepositoryProvider).ensureSlotsForUnit(
+    // Reconcile (not just ensure) so the compartments always match the unit's
+    // current config — e.g. a fridge switched to two doors gains its second
+    // bank of door bins on open. Populated slots are never removed.
+    await ref.read(slotRepositoryProvider).reconcileSlotsForUnit(
           householdId: householdId,
           unit: widget.unit,
         );
@@ -49,14 +53,20 @@ class _UnitViewScreenState extends ConsumerState<UnitViewScreen> {
     final items = ref.watch(itemsProvider).value ?? [];
 
     final itemCountBySlot = <String, int>{};
+    final itemsBySlot = <String, List<Item>>{};
     for (final item in items) {
       itemCountBySlot[item.slotId] =
           (itemCountBySlot[item.slotId] ?? 0) + 1;
+      (itemsBySlot[item.slotId] ??= []).add(item);
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.unit.name),
+        title: Text(
+          widget.unit.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           IconButton(
             tooltip: 'QR labels',
@@ -91,10 +101,11 @@ class _UnitViewScreenState extends ConsumerState<UnitViewScreen> {
                 ),
                 const SizedBox(height: 12),
                 Expanded(
-                  child: ShelfMap(
+                  child: UnitInterior(
                     unit: widget.unit,
                     slots: slots,
                     itemCountBySlot: itemCountBySlot,
+                    itemsBySlot: itemsBySlot,
                     highlightSlotId: widget.highlightSlotId,
                     highlightItemName: widget.highlightItemName,
                     onSlotTap: (slot) {

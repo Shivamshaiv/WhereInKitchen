@@ -2,49 +2,61 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wherein_kitchen/models/elevation.dart';
 import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
+import 'package:wherein_kitchen/screens/room/wall_elevation_screen.dart';
 import 'package:wherein_kitchen/screens/unit/unit_peek_screen.dart';
+import 'package:wherein_kitchen/widgets/room_geometry.dart';
+import 'package:wherein_kitchen/widgets/unit_colors.dart';
 
-/// True 3D room view with an orbiting camera.
+/// True 3D room view with an orbiting camera. Assembles the room from every
+/// wall/island surface's elevation placement (world units = metres).
 ///
-/// - One-finger drag orbits the camera around the room (yaw + pitch), so you
-///   can walk around and see the far side of the kitchen.
-/// - Pinch zooms the camera in/out.
-/// - Tap a unit to select it; the bottom toolbar lets you rotate the unit in
-///   place (its doors/shelves face a new direction while its floor footprint
-///   stays fixed) or open it to peek inside.
+/// - One-finger drag orbits the camera (yaw + pitch); pinch zooms.
+/// - Tap a unit to select it and open its shelves.
 class Room3DScreen extends ConsumerStatefulWidget {
-  const Room3DScreen({super.key, required this.room});
+  const Room3DScreen({super.key, required this.room, this.focusUnitId});
 
   final Room room;
 
-  static const int gridCols = 14;
-  static const int gridRows = 14;
+  /// When set, the camera frames this unit on open and it starts selected —
+  /// used by "See it in 3D" from a search result.
+  final String? focusUnitId;
 
   @override
   ConsumerState<Room3DScreen> createState() => _Room3DScreenState();
 }
 
 class _Room3DScreenState extends ConsumerState<Room3DScreen> {
-  // Camera orbit state.
-  static const double _defaultYaw = math.pi / 4; // Classic iso-like corner.
+  static const double _defaultYaw = math.pi / 4;
   static const double _defaultPitch = 0.5;
   double _yaw = _defaultYaw;
   double _pitch = _defaultPitch;
-  double _distance = 24;
-  double _startDistance = 24;
+  double _distance = 6;
+  double _startDistance = 6;
 
-  // Auto-framed look-at point + whether we've framed the current units yet.
-  _Vec3 _target = const _Vec3(
-    Room3DScreen.gridCols / 2,
-    Room3DScreen.gridRows / 2,
-    0.9,
-  );
+  Vec3 _target = const Vec3(1.8, 1.5, 0.9);
   bool _framed = false;
 
   String? _selectedUnitId;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedUnitId = widget.focusUnitId;
+  }
+
+  Room _liveRoom() {
+    final rooms = ref.read(roomsProvider).value;
+    if (rooms != null) {
+      for (final r in rooms) {
+        if (r.id == widget.room.id) return r;
+      }
+    }
+    return widget.room;
+  }
 
   List<StorageUnit> _unitsForRoom(List<StorageUnit> all) {
     final units = all.where((u) => u.roomId == widget.room.id).toList();
@@ -52,13 +64,12 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
     return units;
   }
 
-  /// Points the camera at the cabinets and picks a distance that fills the
-  /// view, so a couple of units in a big room aren't a tiny far-off diorama.
-  void _frameUnits(List<StorageUnit> units, Size size) {
+  void _frameUnits(List<StorageUnit> units, Room room, Size size) {
+    final cx = room.widthCm / 200;
+    final cy = room.lengthCm / 200;
     if (units.isEmpty) {
-      _target = const _Vec3(
-          Room3DScreen.gridCols / 2, Room3DScreen.gridRows / 2, 0.9);
-      _distance = 24;
+      _target = Vec3(cx, cy, 0.9);
+      _distance = math.max(room.widthCm, room.lengthCm) / 100 * 1.4 + 2;
       return;
     }
 
@@ -67,24 +78,27 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
         maxY = -double.infinity,
         maxZ = -double.infinity;
     for (final u in units) {
-      final band = _zBand3D(u);
-      minX = math.min(minX, u.gx.toDouble());
-      minY = math.min(minY, u.gy.toDouble());
-      minZ = math.min(minZ, band.bottom);
-      maxX = math.max(maxX, (u.gx + u.gw).toDouble());
-      maxY = math.max(maxY, (u.gy + u.gh).toDouble());
-      maxZ = math.max(maxZ, band.top);
+      final b = worldPlacementOf(u, room);
+      minX = math.min(minX, b.min.x);
+      minY = math.min(minY, b.min.y);
+      minZ = math.min(minZ, b.min.z);
+      maxX = math.max(maxX, b.max.x);
+      maxY = math.max(maxY, b.max.y);
+      maxZ = math.max(maxZ, b.max.z);
     }
 
-    _target = _Vec3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+    _target = Vec3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+    final radius =
+        Vec3(maxX - minX, maxY - minY, maxZ - minZ).scale(0.5).length + 0.8;
+    _distance = (radius / 0.32 * 1.15).clamp(2.5, 30.0);
+  }
 
-    // Bounding radius of the content, then back off enough to fit it in the
-    // camera's ~19° half-angle (focal = min(w,h) * 1.45).
-    final radius = _Vec3(maxX - minX, maxY - minY, maxZ - minZ)
-            .scale(0.5)
-            .length +
-        1.5;
-    _distance = (radius / 0.32 * 1.15).clamp(9.0, 55.0);
+  /// Frame the camera tightly on a single unit (for "See it in 3D").
+  void _frameOnUnit(StorageUnit unit, Room room) {
+    final b = worldPlacementOf(unit, room);
+    _target = b.center;
+    final radius = Vec3(b.width, b.depth, b.height).scale(0.5).length + 0.5;
+    _distance = (radius / 0.32 * 1.15).clamp(1.4, 20.0);
   }
 
   _Camera _camera(Size size) {
@@ -104,7 +118,7 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
   void _onScaleUpdate(ScaleUpdateDetails details) {
     setState(() {
       if (details.pointerCount >= 2) {
-        _distance = (_startDistance / details.scale).clamp(8.0, 60.0);
+        _distance = (_startDistance / details.scale).clamp(1.2, 40.0);
       }
       _yaw -= details.focalPointDelta.dx * 0.008;
       _pitch =
@@ -112,66 +126,75 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
     });
   }
 
-  void _onTapUp(TapUpDetails details, Size size, List<StorageUnit> units) {
+  void _onTapUp(
+      TapUpDetails details, Size size, List<StorageUnit> units, Room room) {
     final camera = _camera(size);
-    final hit = _hitTest(details.localPosition, camera, units);
+    final hit = _hitTest(details.localPosition, camera, units, room);
     setState(() => _selectedUnitId = hit?.id);
   }
 
   StorageUnit? _hitTest(
-      Offset position, _Camera camera, List<StorageUnit> units) {
+      Offset position, _Camera camera, List<StorageUnit> units, Room room) {
+    // Ray from the camera through the tapped pixel; pick the nearest box hit.
+    final dir = camera.rayDirThrough(position);
     StorageUnit? best;
-    var bestDepth = double.infinity;
+    var bestT = double.infinity;
     for (final unit in units) {
-      final box = _UnitBox(unit);
-      for (final face in box.faces) {
-        final projected = <Offset>[];
-        var depth = 0.0;
-        var behind = false;
-        for (final v in face.corners) {
-          final p = camera.project(v);
-          if (p == null) {
-            behind = true;
-            break;
-          }
-          projected.add(p.offset);
-          depth += p.depth;
-        }
-        if (behind) continue;
-        depth /= face.corners.length;
-        if (_pointInPolygon(position, projected) && depth < bestDepth) {
-          bestDepth = depth;
-          best = unit;
-        }
+      final b = worldPlacementOf(unit, room);
+      final t = _rayBoxT(camera.eye, dir, b.min.x, b.max.x, b.min.y, b.max.y,
+          b.min.z, b.max.z);
+      if (t != null && t < bestT) {
+        bestT = t;
+        best = unit;
       }
     }
     return best;
   }
 
-  bool _pointInPolygon(Offset p, List<Offset> polygon) {
-    var inside = false;
-    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      final a = polygon[i];
-      final b = polygon[j];
-      if ((a.dy > p.dy) != (b.dy > p.dy) &&
-          p.dx < (b.dx - a.dx) * (p.dy - a.dy) / (b.dy - a.dy) + a.dx) {
-        inside = !inside;
+  double? _rayBoxT(Vec3 o, Vec3 d, double x0, double x1, double y0, double y1,
+      double z0, double z1) {
+    var tmin = -double.infinity;
+    var tmax = double.infinity;
+
+    bool slab(double origin, double dir, double lo, double hi) {
+      if (dir.abs() < 1e-9) return origin >= lo && origin <= hi;
+      var t1 = (lo - origin) / dir;
+      var t2 = (hi - origin) / dir;
+      if (t1 > t2) {
+        final tmp = t1;
+        t1 = t2;
+        t2 = tmp;
       }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      return true;
     }
-    return inside;
+
+    if (!slab(o.x, d.x, x0, x1)) return null;
+    if (!slab(o.y, d.y, y0, y1)) return null;
+    if (!slab(o.z, d.z, z0, z1)) return null;
+    if (tmax < tmin || tmax < 0) return null;
+    return tmin >= 0 ? tmin : tmax;
   }
 
-  Future<void> _rotateSelected(List<StorageUnit> units, int delta) async {
-    final unit =
-        units.where((u) => u.id == _selectedUnitId).firstOrNull;
-    if (unit == null) return;
-    final updated = unit.copyWith(facing: (unit.facing + delta + 4) % 4);
-    await ref.read(unitRepositoryProvider).updateUnit(updated);
+  void _editOnWall(StorageUnit unit, Room room) {
+    final sid = unit.surfaceId;
+    if (sid == null) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+            content: Text("This unit isn't placed on a wall yet")));
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WallElevationScreen(room: room, surfaceId: sid),
+      ),
+    );
   }
 
   void _openSelected(List<StorageUnit> units) {
-    final unit =
-        units.where((u) => u.id == _selectedUnitId).firstOrNull;
+    final unit = units.where((u) => u.id == _selectedUnitId).firstOrNull;
     if (unit == null) return;
     if (!unit.holdsItems) {
       ScaffoldMessenger.of(context)
@@ -188,6 +211,7 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final room = _liveRoom();
     final unitsAsync = ref.watch(unitsProvider);
     final items = ref.watch(itemsProvider).value ?? [];
     final slots = ref.watch(slotsProvider).value ?? [];
@@ -203,7 +227,11 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('${widget.room.name} · 3D'),
+        title: Text(
+          '${room.name} · 3D',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           IconButton(
             tooltip: 'Reset camera',
@@ -211,45 +239,56 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
             onPressed: () => setState(() {
               _yaw = _defaultYaw;
               _pitch = _defaultPitch;
-              _framed = false; // Re-fit to the cabinets on next paint.
+              _framed = false;
             }),
           ),
         ],
       ),
       body: unitsAsync.when(
         data: (allUnits) {
-          final units =
-              _unitsForRoom(allUnits).where((u) => u.hasLayoutPosition).toList();
+          final units = _unitsForRoom(allUnits);
           final selected =
               units.where((u) => u.id == _selectedUnitId).firstOrNull;
 
           return Stack(
             children: [
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final size =
-                      Size(constraints.maxWidth, constraints.maxHeight);
-                  if (!_framed && size.width.isFinite) {
-                    _frameUnits(units, size);
-                    _framed = true;
-                  }
-                  return GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onScaleStart: _onScaleStart,
-                    onScaleUpdate: _onScaleUpdate,
-                    onTapUp: (d) => _onTapUp(d, size, units),
-                    child: CustomPaint(
-                      size: size,
-                      painter: _Room3DPainter(
-                        units: units,
-                        camera: _camera(size),
-                        selectedUnitId: _selectedUnitId,
-                        itemCountByUnit: itemCountByUnit,
-                        scheme: Theme.of(context).colorScheme,
+              Positioned.fill(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final size =
+                        Size(constraints.maxWidth, constraints.maxHeight);
+                    if (!_framed && size.width.isFinite) {
+                      final focus = widget.focusUnitId == null
+                          ? null
+                          : units
+                              .where((u) => u.id == widget.focusUnitId)
+                              .firstOrNull;
+                      if (focus != null) {
+                        _frameOnUnit(focus, room);
+                      } else {
+                        _frameUnits(units, room, size);
+                      }
+                      _framed = true;
+                    }
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onScaleStart: _onScaleStart,
+                      onScaleUpdate: _onScaleUpdate,
+                      onTapUp: (d) => _onTapUp(d, size, units, room),
+                      child: CustomPaint(
+                        size: size,
+                        painter: _Room3DPainter(
+                          units: units,
+                          room: room,
+                          camera: _camera(size),
+                          selectedUnitId: _selectedUnitId,
+                          itemCountByUnit: itemCountByUnit,
+                          scheme: Theme.of(context).colorScheme,
+                        ),
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
               Positioned(
                 left: 0,
@@ -269,7 +308,7 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
                     child: Text(
                       selected == null
                           ? 'Drag to orbit · pinch to zoom · tap a unit'
-                          : 'Rotate keeps its spot — only the facing changes',
+                          : 'Design placement on the wall elevation',
                       style: Theme.of(context).textTheme.labelMedium,
                     ),
                   ),
@@ -282,11 +321,9 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
                   bottom: 16,
                   child: _Selected3DToolbar(
                     unit: selected,
-                    onRotateLeft: () => _rotateSelected(units, 1),
-                    onRotateRight: () => _rotateSelected(units, -1),
+                    onEditOnWall: () => _editOnWall(selected, room),
                     onOpen: () => _openSelected(units),
-                    onClose: () =>
-                        setState(() => _selectedUnitId = null),
+                    onClose: () => setState(() => _selectedUnitId = null),
                   ),
                 ),
             ],
@@ -299,19 +336,17 @@ class _Room3DScreenState extends ConsumerState<Room3DScreen> {
   }
 }
 
-/// Bottom toolbar for the selected unit: rotate in place + open.
+/// Bottom toolbar for the selected unit: open its shelves.
 class _Selected3DToolbar extends StatelessWidget {
   const _Selected3DToolbar({
     required this.unit,
-    required this.onRotateLeft,
-    required this.onRotateRight,
+    required this.onEditOnWall,
     required this.onOpen,
     required this.onClose,
   });
 
   final StorageUnit unit;
-  final VoidCallback onRotateLeft;
-  final VoidCallback onRotateRight;
+  final VoidCallback onEditOnWall;
   final VoidCallback onOpen;
   final VoidCallback onClose;
 
@@ -324,14 +359,16 @@ class _Selected3DToolbar extends StatelessWidget {
       color: scheme.surfaceContainerHighest,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-        child: Column(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 200),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
                     unit.name,
                     maxLines: 1,
                     softWrap: false,
@@ -341,44 +378,32 @@ class _Selected3DToolbar extends StatelessWidget {
                         .titleSmall
                         ?.copyWith(fontWeight: FontWeight.w700),
                   ),
-                ),
-                IconButton(
-                  tooltip: 'Deselect',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(Icons.close),
-                  onPressed: onClose,
-                ),
-              ],
-            ),
-            Text(
-              '${unit.mount.label} · faces ${facingLabel(unit.facing)}',
-              maxLines: 1,
-              softWrap: false,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                IconButton.filledTonal(
-                  tooltip: 'Rotate left',
-                  icon: const Icon(Icons.rotate_left),
-                  onPressed: onRotateLeft,
-                ),
-                const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  tooltip: 'Rotate right',
-                  icon: const Icon(Icons.rotate_right),
-                  onPressed: onRotateRight,
-                ),
-                const Spacer(),
-                if (unit.holdsItems)
-                  FilledButton.icon(
-                    onPressed: onOpen,
-                    icon: const Icon(Icons.visibility_outlined, size: 18),
-                    label: const Text('Open'),
+                  Text(
+                    unit.type.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
                   ),
-              ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: 'Edit on wall',
+              icon: const Icon(Icons.dashboard_customize_outlined),
+              onPressed: onEditOnWall,
+            ),
+            if (unit.holdsItems)
+              IconButton(
+                tooltip: 'Open shelves',
+                icon: const Icon(Icons.visibility_outlined),
+                onPressed: onOpen,
+              ),
+            IconButton(
+              tooltip: 'Deselect',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close),
+              onPressed: onClose,
             ),
           ],
         ),
@@ -388,26 +413,8 @@ class _Selected3DToolbar extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// 3D math
+// Camera
 // ---------------------------------------------------------------------------
-
-class _Vec3 {
-  const _Vec3(this.x, this.y, this.z);
-  final double x, y, z;
-
-  _Vec3 operator -(_Vec3 o) => _Vec3(x - o.x, y - o.y, z - o.z);
-  _Vec3 operator +(_Vec3 o) => _Vec3(x + o.x, y + o.y, z + o.z);
-  _Vec3 scale(double s) => _Vec3(x * s, y * s, z * s);
-
-  double dot(_Vec3 o) => x * o.x + y * o.y + z * o.z;
-  _Vec3 cross(_Vec3 o) =>
-      _Vec3(y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x);
-  double get length => math.sqrt(dot(this));
-  _Vec3 get normalized {
-    final l = length;
-    return l == 0 ? this : _Vec3(x / l, y / l, z / l);
-  }
-}
 
 class _Projected {
   const _Projected(this.offset, this.depth);
@@ -425,39 +432,48 @@ class _Camera {
     required this.viewport,
   }) {
     eye = target +
-        _Vec3(
+        Vec3(
           math.cos(pitch) * math.sin(yaw),
           math.cos(pitch) * math.cos(yaw),
           math.sin(pitch),
         ).scale(distance);
     forward = (target - eye).normalized;
-    right = forward.cross(const _Vec3(0, 0, 1)).normalized;
+    right = forward.cross(const Vec3(0, 0, 1)).normalized;
     up = right.cross(forward);
     focal = math.min(viewport.width, viewport.height) * 1.45;
   }
 
-  final _Vec3 target;
+  final Vec3 target;
   final Size viewport;
-  late final _Vec3 eye;
-  late final _Vec3 forward;
-  late final _Vec3 right;
-  late final _Vec3 up;
+  late final Vec3 eye;
+  late final Vec3 forward;
+  late final Vec3 right;
+  late final Vec3 up;
   late final double focal;
 
-  /// Projects a world point; null when behind the camera.
-  _Projected? project(_Vec3 p) {
+  _Projected? project(Vec3 p) {
     final v = p - eye;
     final zc = v.dot(forward);
     if (zc <= 0.1) return null;
     final xc = v.dot(right);
     final yc = v.dot(up);
+    final sx = viewport.width / 2 + focal * xc / zc;
+    final sy = viewport.height / 2 - focal * yc / zc;
+    if (!sx.isFinite || !sy.isFinite) return null;
+    // Clamp far outside any viewport so CanvasKit never has to rasterize a
+    // runaway-size polygon — that blocks the single-threaded web canvas and
+    // hangs the whole tab. Off-screen corners stay off-screen; visible shape
+    // is unchanged.
     return _Projected(
-      Offset(
-        viewport.width / 2 + focal * xc / zc,
-        viewport.height / 2 - focal * yc / zc,
-      ),
+      Offset(sx.clamp(-1e4, 1e4).toDouble(), sy.clamp(-1e4, 1e4).toDouble()),
       zc,
     );
+  }
+
+  Vec3 rayDirThrough(Offset p) {
+    final nx = (p.dx - viewport.width / 2) / focal;
+    final ny = -(p.dy - viewport.height / 2) / focal;
+    return (forward + right.scale(nx) + up.scale(ny)).normalized;
   }
 }
 
@@ -465,79 +481,66 @@ class _Camera {
 // Unit geometry
 // ---------------------------------------------------------------------------
 
-/// Which world direction a face points.
 enum _FaceDir { top, bottom, north, south, east, west }
 
 class _Face {
   const _Face(this.corners, this.normal, this.dir);
-  final List<_Vec3> corners;
-  final _Vec3 normal;
+  final List<Vec3> corners;
+  final Vec3 normal;
   final _FaceDir dir;
 }
 
-/// Vertical band factors — shared with the 2.5D view so both stay consistent.
-({double bottom, double top}) _zBand3D(StorageUnit unit) => unitZBand(unit);
-
+/// Six faces of a unit's world-space box, plus which face is its front.
 class _UnitBox {
-  _UnitBox(this.unit) {
-    final band = _zBand3D(unit);
-    final x0 = unit.gx.toDouble();
-    final x1 = (unit.gx + unit.gw).toDouble();
-    final y0 = unit.gy.toDouble();
-    final y1 = (unit.gy + unit.gh).toDouble();
-    final z0 = band.bottom;
-    final z1 = band.top;
-
+  _UnitBox(this.box) {
+    final x0 = box.min.x, x1 = box.max.x;
+    final y0 = box.min.y, y1 = box.max.y;
+    final z0 = box.min.z, z1 = box.max.z;
     faces = [
       _Face(
-        [_Vec3(x0, y0, z1), _Vec3(x1, y0, z1), _Vec3(x1, y1, z1), _Vec3(x0, y1, z1)],
-        const _Vec3(0, 0, 1),
+        [Vec3(x0, y0, z1), Vec3(x1, y0, z1), Vec3(x1, y1, z1), Vec3(x0, y1, z1)],
+        const Vec3(0, 0, 1),
         _FaceDir.top,
       ),
       _Face(
-        [_Vec3(x0, y0, z0), _Vec3(x1, y0, z0), _Vec3(x1, y1, z0), _Vec3(x0, y1, z0)],
-        const _Vec3(0, 0, -1),
+        [Vec3(x0, y0, z0), Vec3(x1, y0, z0), Vec3(x1, y1, z0), Vec3(x0, y1, z0)],
+        const Vec3(0, 0, -1),
         _FaceDir.bottom,
       ),
       _Face(
-        [_Vec3(x0, y1, z0), _Vec3(x1, y1, z0), _Vec3(x1, y1, z1), _Vec3(x0, y1, z1)],
-        const _Vec3(0, 1, 0),
+        [Vec3(x0, y1, z0), Vec3(x1, y1, z0), Vec3(x1, y1, z1), Vec3(x0, y1, z1)],
+        const Vec3(0, 1, 0),
         _FaceDir.south,
       ),
       _Face(
-        [_Vec3(x1, y0, z0), _Vec3(x0, y0, z0), _Vec3(x0, y0, z1), _Vec3(x1, y0, z1)],
-        const _Vec3(0, -1, 0),
+        [Vec3(x1, y0, z0), Vec3(x0, y0, z0), Vec3(x0, y0, z1), Vec3(x1, y0, z1)],
+        const Vec3(0, -1, 0),
         _FaceDir.north,
       ),
       _Face(
-        [_Vec3(x1, y1, z0), _Vec3(x1, y0, z0), _Vec3(x1, y0, z1), _Vec3(x1, y1, z1)],
-        const _Vec3(1, 0, 0),
+        [Vec3(x1, y1, z0), Vec3(x1, y0, z0), Vec3(x1, y0, z1), Vec3(x1, y1, z1)],
+        const Vec3(1, 0, 0),
         _FaceDir.east,
       ),
       _Face(
-        [_Vec3(x0, y0, z0), _Vec3(x0, y1, z0), _Vec3(x0, y1, z1), _Vec3(x0, y0, z1)],
-        const _Vec3(-1, 0, 0),
+        [Vec3(x0, y0, z0), Vec3(x0, y1, z0), Vec3(x0, y1, z1), Vec3(x0, y0, z1)],
+        const Vec3(-1, 0, 0),
         _FaceDir.west,
       ),
     ];
   }
 
-  final StorageUnit unit;
+  final WorldBox box;
   late final List<_Face> faces;
 
-  /// The face the unit's doors/shelves are on, from its [StorageUnit.facing].
-  _FaceDir get frontDir => switch (unit.facing % 4) {
-        0 => _FaceDir.south, // +y ("front" of the room grid)
-        1 => _FaceDir.east,
-        2 => _FaceDir.north,
-        _ => _FaceDir.west,
+  _FaceDir get frontDir => switch (box.front) {
+        BoxFace.north => _FaceDir.north,
+        BoxFace.south => _FaceDir.south,
+        BoxFace.east => _FaceDir.east,
+        BoxFace.west => _FaceDir.west,
       };
 
-  _Vec3 get center => _Vec3(
-        unit.gx + unit.gw / 2,
-        unit.gy + unit.gh / 2,
-        (_zBand3D(unit).bottom + _zBand3D(unit).top) / 2,
-      );
+  Vec3 get center => box.center;
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +565,7 @@ class _PaintFace {
 class _Room3DPainter extends CustomPainter {
   _Room3DPainter({
     required this.units,
+    required this.room,
     required this.camera,
     required this.selectedUnitId,
     required this.itemCountByUnit,
@@ -569,33 +573,18 @@ class _Room3DPainter extends CustomPainter {
   });
 
   final List<StorageUnit> units;
+  final Room room;
   final _Camera camera;
   final String? selectedUnitId;
   final Map<String, int> itemCountByUnit;
   final ColorScheme scheme;
 
-  static const double _wallHeight = 3.4;
-
-  Color _baseColor(StorageUnitType type) {
-    final seed = switch (type) {
-      StorageUnitType.shelf => const Color(0xFF8D6E63),
-      StorageUnitType.drawer => const Color(0xFF78909C),
-      StorageUnitType.cabinet => const Color(0xFFA1887F),
-      StorageUnitType.fridge => const Color(0xFF90A4AE),
-      StorageUnitType.freezer => const Color(0xFF81D4FA),
-      StorageUnitType.range => const Color(0xFF546E7A),
-      StorageUnitType.sink => const Color(0xFFB0BEC5),
-      StorageUnitType.dishwasher => const Color(0xFF9E9E9E),
-      StorageUnitType.oven => const Color(0xFF607D8B),
-      StorageUnitType.gap => const Color(0xFF6D6D6D),
-      StorageUnitType.other => const Color(0xFF9E9E9E),
-    };
-    return Color.lerp(seed, scheme.surfaceContainerHighest, 0.2)!;
-  }
+  double get _roomW => room.widthCm / 100;
+  double get _roomL => room.lengthCm / 100;
+  double get _wallHeight => room.wallHeightCm / 100;
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Sky/room backdrop.
     canvas.drawRect(
       Offset.zero & size,
       Paint()
@@ -612,14 +601,20 @@ class _Room3DPainter extends CustomPainter {
     _paintWalls(canvas);
     _paintFloor(canvas);
 
-    // Collect all visible faces from all units and depth-sort globally.
-    final paintFaces = <_PaintFace>[];
+    // Gaps are floor decals — draw first.
+    for (final unit in units.where((u) => u.type == StorageUnitType.gap)) {
+      _paintGap(canvas, unit);
+    }
+
+    // Collect unit faces AND island faces into ONE depth-sorted list, so
+    // islands correctly occlude / are occluded by units (not a blind pre-pass).
+    final drawables = <({double depth, void Function(Canvas) draw})>[];
+
     for (final unit in units) {
       if (unit.type == StorageUnitType.gap) continue;
-      final box = _UnitBox(unit);
+      final box = _UnitBox(worldPlacementOf(unit, room));
       for (final face in box.faces) {
         if (face.dir == _FaceDir.bottom) continue;
-        // Backface culling.
         final faceCenter = face.corners
             .reduce((a, b) => a + b)
             .scale(1 / face.corners.length);
@@ -638,30 +633,66 @@ class _Room3DPainter extends CustomPainter {
           depth += p.depth;
         }
         if (behind) continue;
-        paintFaces.add(_PaintFace(
+        final pf = _PaintFace(
           unit: unit,
           face: face,
           points: pts,
           depth: depth / face.corners.length,
           isFront: face.dir == box.frontDir,
+        );
+        drawables.add((depth: pf.depth, draw: (c) => _paintFace(c, pf)));
+      }
+    }
+
+    for (final island in room.islands) {
+      for (final f in _islandFaces(island)) {
+        final faceCenter =
+            f.corners.reduce((a, b) => a + b).scale(1 / f.corners.length);
+        if (f.normal.dot(camera.eye - faceCenter) <= 0) continue;
+        final pts = <Offset>[];
+        var depth = 0.0;
+        var behind = false;
+        for (final v in f.corners) {
+          final p = camera.project(v);
+          if (p == null) {
+            behind = true;
+            break;
+          }
+          pts.add(p.offset);
+          depth += p.depth;
+        }
+        if (behind) continue;
+        final color = _shade(
+            Color.lerp(scheme.surfaceContainerHighest, scheme.tertiary, 0.1)!,
+            f.shade);
+        final poly = pts;
+        drawables.add((
+          depth: depth / f.corners.length,
+          draw: (c) {
+            final path = Path()..addPolygon(poly, true);
+            c.drawPath(path, Paint()..color = color);
+            c.drawPath(
+              path,
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1
+                ..color = Colors.black.withValues(alpha: 0.25),
+            );
+          },
         ));
       }
     }
-    paintFaces.sort((a, b) => b.depth.compareTo(a.depth));
 
-    // Gaps are just floor decals; draw before boxes.
-    for (final unit in units.where((u) => u.type == StorageUnitType.gap)) {
-      _paintGap(canvas, unit);
+    drawables.sort((a, b) => b.depth.compareTo(a.depth));
+    for (final d in drawables) {
+      d.draw(canvas);
     }
 
-    for (final pf in paintFaces) {
-      _paintFace(canvas, pf);
-    }
-
-    // Labels last so they float above geometry (near units get bigger text).
     final labelOrder = [...units]..sort((a, b) {
-        final da = (camera.eye - _UnitBox(a).center).length;
-        final db = (camera.eye - _UnitBox(b).center).length;
+        final da =
+            (camera.eye - worldPlacementOf(a, room).center).length;
+        final db =
+            (camera.eye - worldPlacementOf(b, room).center).length;
         return db.compareTo(da);
       });
     for (final unit in labelOrder) {
@@ -670,99 +701,62 @@ class _Room3DPainter extends CustomPainter {
   }
 
   void _paintFloor(Canvas canvas) {
-    const cols = Room3DScreen.gridCols;
-    const rows = Room3DScreen.gridRows;
-
     Offset? proj(double x, double y, [double z = 0]) =>
-        camera.project(_Vec3(x, y, z))?.offset;
+        camera.project(Vec3(x, y, z))?.offset;
 
     final c00 = proj(0, 0);
-    final c10 = proj(cols.toDouble(), 0);
-    final c11 = proj(cols.toDouble(), rows.toDouble());
-    final c01 = proj(0, rows.toDouble());
+    final c10 = proj(_roomW, 0);
+    final c11 = proj(_roomW, _roomL);
+    final c01 = proj(0, _roomL);
     if (c00 == null || c10 == null || c11 == null || c01 == null) return;
 
-    final floor = Path()..addPolygon([c00, c10, c11, c01], true);
     canvas.drawPath(
-      floor,
+      Path()..addPolygon([c00, c10, c11, c01], true),
       Paint()
-        ..color =
-            Color.lerp(scheme.surfaceContainerHigh, scheme.primary, 0.05)!,
+        ..color = Color.lerp(scheme.surfaceContainerHigh, scheme.primary, 0.05)!,
     );
 
     final gridPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1
-      ..color = scheme.outlineVariant.withValues(alpha: 0.7);
-    for (var x = 0; x <= cols; x++) {
-      final a = proj(x.toDouble(), 0);
-      final b = proj(x.toDouble(), rows.toDouble());
+      ..color = scheme.outlineVariant.withValues(alpha: 0.6);
+    for (var x = 0.0; x <= _roomW + 0.001; x += 1.0) {
+      final a = proj(x, 0);
+      final b = proj(x, _roomL);
       if (a != null && b != null) canvas.drawLine(a, b, gridPaint);
     }
-    for (var y = 0; y <= rows; y++) {
-      final a = proj(0, y.toDouble());
-      final b = proj(cols.toDouble(), y.toDouble());
+    for (var y = 0.0; y <= _roomL + 0.001; y += 1.0) {
+      final a = proj(0, y);
+      final b = proj(_roomW, y);
       if (a != null && b != null) canvas.drawLine(a, b, gridPaint);
     }
   }
 
-  /// Draws the two room walls that are on the far side from the camera, so
-  /// they frame the room without ever hiding the cabinets.
   void _paintWalls(Canvas canvas) {
-    const cols = Room3DScreen.gridCols + 0.0;
-    const rows = Room3DScreen.gridRows + 0.0;
-
-    final walls = <({List<_Vec3> corners, _Vec3 normal})>[
-      // North wall (y = 0), outward normal -y.
+    final w = _roomW, l = _roomL, h = _wallHeight;
+    final walls = <({List<Vec3> corners, Vec3 normal})>[
       (
-        corners: [
-          const _Vec3(0, 0, 0),
-          const _Vec3(cols, 0, 0),
-          const _Vec3(cols, 0, _wallHeight),
-          const _Vec3(0, 0, _wallHeight),
-        ],
-        normal: const _Vec3(0, -1, 0)
+        corners: [const Vec3(0, 0, 0), Vec3(w, 0, 0), Vec3(w, 0, h), Vec3(0, 0, h)],
+        normal: const Vec3(0, -1, 0)
       ),
-      // South wall (y = rows), outward normal +y.
       (
-        corners: [
-          const _Vec3(0, rows, 0),
-          const _Vec3(cols, rows, 0),
-          const _Vec3(cols, rows, _wallHeight),
-          const _Vec3(0, rows, _wallHeight),
-        ],
-        normal: const _Vec3(0, 1, 0)
+        corners: [Vec3(0, l, 0), Vec3(w, l, 0), Vec3(w, l, h), Vec3(0, l, h)],
+        normal: const Vec3(0, 1, 0)
       ),
-      // West wall (x = 0), outward normal -x.
       (
-        corners: [
-          const _Vec3(0, 0, 0),
-          const _Vec3(0, rows, 0),
-          const _Vec3(0, rows, _wallHeight),
-          const _Vec3(0, 0, _wallHeight),
-        ],
-        normal: const _Vec3(-1, 0, 0)
+        corners: [const Vec3(0, 0, 0), Vec3(0, l, 0), Vec3(0, l, h), Vec3(0, 0, h)],
+        normal: const Vec3(-1, 0, 0)
       ),
-      // East wall (x = cols), outward normal +x.
       (
-        corners: [
-          const _Vec3(cols, 0, 0),
-          const _Vec3(cols, rows, 0),
-          const _Vec3(cols, rows, _wallHeight),
-          const _Vec3(cols, 0, _wallHeight),
-        ],
-        normal: const _Vec3(1, 0, 0)
+        corners: [Vec3(w, 0, 0), Vec3(w, l, 0), Vec3(w, l, h), Vec3(w, 0, h)],
+        normal: const Vec3(1, 0, 0)
       ),
     ];
 
     for (final wall in walls) {
-      final center = wall.corners
-          .reduce((a, b) => a + b)
-          .scale(1 / wall.corners.length);
-      // Draw only walls whose outward normal points away from the camera —
-      // those are behind the room content.
+      final center =
+          wall.corners.reduce((a, b) => a + b).scale(1 / wall.corners.length);
       if (wall.normal.dot(camera.eye - center) > 0) continue;
-
       final pts = <Offset>[];
       var behind = false;
       for (final v in wall.corners) {
@@ -774,14 +768,13 @@ class _Room3DPainter extends CustomPainter {
         pts.add(p.offset);
       }
       if (behind) continue;
-
       final path = Path()..addPolygon(pts, true);
       canvas.drawPath(
         path,
         Paint()
-          ..color = Color.lerp(
-                  scheme.surfaceContainerHighest, scheme.primary, 0.04)!
-              .withValues(alpha: 0.96),
+          ..color =
+              Color.lerp(scheme.surfaceContainerHighest, scheme.primary, 0.04)!
+                  .withValues(alpha: 0.96),
       );
       canvas.drawPath(
         path,
@@ -793,14 +786,54 @@ class _Room3DPainter extends CustomPainter {
     }
   }
 
-  void _paintGap(Canvas canvas, StorageUnit unit) {
-    final pts = <Offset>[];
-    final corners = [
-      _Vec3(unit.gx.toDouble(), unit.gy.toDouble(), 0.01),
-      _Vec3((unit.gx + unit.gw).toDouble(), unit.gy.toDouble(), 0.01),
-      _Vec3((unit.gx + unit.gw).toDouble(), (unit.gy + unit.gh).toDouble(), 0.01),
-      _Vec3(unit.gx.toDouble(), (unit.gy + unit.gh).toDouble(), 0.01),
+  /// The visible faces of an island block (top + 4 sides) with outward normals
+  /// and a shade, for backface culling + depth sorting alongside unit faces.
+  List<({List<Vec3> corners, Vec3 normal, double shade})> _islandFaces(
+      Island island) {
+    final odd = island.rotationQuarters.isOdd;
+    final w = (odd ? island.depthCm : island.widthCm) / 100;
+    final d = (odd ? island.widthCm : island.depthCm) / 100;
+    final x0 = island.xCm / 100, y0 = island.yCm / 100;
+    final x1 = x0 + w, y1 = y0 + d;
+    const top = kCounterHeightCm / 100;
+    return [
+      (
+        corners: [Vec3(x0, y0, top), Vec3(x1, y0, top), Vec3(x1, y1, top), Vec3(x0, y1, top)],
+        normal: const Vec3(0, 0, 1),
+        shade: 0.98
+      ),
+      (
+        corners: [Vec3(x0, y0, 0), Vec3(x1, y0, 0), Vec3(x1, y0, top), Vec3(x0, y0, top)],
+        normal: const Vec3(0, -1, 0),
+        shade: 0.72
+      ),
+      (
+        corners: [Vec3(x0, y1, 0), Vec3(x1, y1, 0), Vec3(x1, y1, top), Vec3(x0, y1, top)],
+        normal: const Vec3(0, 1, 0),
+        shade: 0.66
+      ),
+      (
+        corners: [Vec3(x0, y0, 0), Vec3(x0, y1, 0), Vec3(x0, y1, top), Vec3(x0, y0, top)],
+        normal: const Vec3(-1, 0, 0),
+        shade: 0.6
+      ),
+      (
+        corners: [Vec3(x1, y0, 0), Vec3(x1, y1, 0), Vec3(x1, y1, top), Vec3(x1, y0, top)],
+        normal: const Vec3(1, 0, 0),
+        shade: 0.54
+      ),
     ];
+  }
+
+  void _paintGap(Canvas canvas, StorageUnit unit) {
+    final b = worldPlacementOf(unit, room);
+    final corners = [
+      Vec3(b.min.x, b.min.y, 0.01),
+      Vec3(b.max.x, b.min.y, 0.01),
+      Vec3(b.max.x, b.max.y, 0.01),
+      Vec3(b.min.x, b.max.y, 0.01),
+    ];
+    final pts = <Offset>[];
     for (final v in corners) {
       final p = camera.project(v);
       if (p == null) return;
@@ -808,9 +841,7 @@ class _Room3DPainter extends CustomPainter {
     }
     final path = Path()..addPolygon(pts, true);
     canvas.drawPath(
-      path,
-      Paint()..color = scheme.outlineVariant.withValues(alpha: 0.18),
-    );
+        path, Paint()..color = scheme.outlineVariant.withValues(alpha: 0.18));
     canvas.drawPath(
       path,
       Paint()
@@ -824,18 +855,16 @@ class _Room3DPainter extends CustomPainter {
 
   void _paintFace(Canvas canvas, _PaintFace pf) {
     final selected = pf.unit.id == selectedUnitId;
-    final base = _baseColor(pf.unit.type);
+    final base = unitBaseColor(pf.unit.type, scheme);
 
-    // Simple directional lighting.
-    final light = const _Vec3(0.4, -0.55, 0.73).normalized;
-    final lit = (pf.face.normal.dot(light) + 1) / 2; // 0..1
+    final light = const Vec3(0.4, -0.55, 0.73).normalized;
+    final lit = (pf.face.normal.dot(light) + 1) / 2;
     var color = Color.lerp(
       _shade(base, 0.45),
       Color.lerp(base, Colors.white, 0.25)!,
       lit,
     )!;
     if (selected) color = Color.lerp(color, scheme.primary, 0.3)!;
-    // The front (door) face gets a slight warm tint so rotation reads clearly.
     if (pf.isFront) {
       color = Color.lerp(color, const Color(0xFFFFE0B2), 0.14)!;
     }
@@ -851,27 +880,18 @@ class _Room3DPainter extends CustomPainter {
             selected ? scheme.primary : Colors.black.withValues(alpha: 0.35),
     );
 
-    if (pf.isFront) {
-      _paintFrontDetails(canvas, pf);
-    }
-    if (pf.face.dir == _FaceDir.top) {
-      _paintFacingArrow(canvas, pf.unit);
-    }
+    if (pf.isFront) _paintFrontDetails(canvas, pf);
   }
 
-  /// Shelf ledges + door split, drawn on the face the unit is facing.
   void _paintFrontDetails(Canvas canvas, _PaintFace pf) {
     final unit = pf.unit;
-    final pts = pf.points; // 0-1 bottom edge, 2-3 top edge (corner order).
+    final pts = pf.points;
     if (pts.length != 4) return;
-
-    // Corner order for side faces is (b0, b1, t1, t0).
     final b0 = pts[0], b1 = pts[1], t1 = pts[2], t0 = pts[3];
 
-    Offset lerpEdge(Offset a, Offset b, double t) => Offset.lerp(a, b, t)!;
     Offset at(double tx, double tz) {
-      final bottom = lerpEdge(b0, b1, tx);
-      final top = lerpEdge(t0, t1, tx);
+      final bottom = Offset.lerp(b0, b1, tx)!;
+      final top = Offset.lerp(t0, t1, tx)!;
       return Offset.lerp(bottom, top, tz)!;
     }
 
@@ -881,20 +901,20 @@ class _Room3DPainter extends CustomPainter {
       ..color = Colors.black.withValues(alpha: 0.3);
 
     if (unit.holdsItems) {
-      final rowCount = unit.rows.clamp(1, 8);
+      final rowCount = unit.rows.clamp(1, kMaxShelfRows);
       for (var i = 1; i < rowCount; i++) {
         final tz = i / rowCount;
         canvas.drawLine(at(0.06, tz), at(0.94, tz), shelfPaint);
       }
-      if (unit.columns > 1) {
-        for (var c = 1; c < unit.columns; c++) {
-          final tx = c / unit.columns;
+      final colCount = unit.columns.clamp(1, kMaxDoors);
+      if (colCount > 1) {
+        for (var c = 1; c < colCount; c++) {
+          final tx = c / colCount;
           canvas.drawLine(at(tx, 0.04), at(tx, 0.96), shelfPaint);
         }
       }
     }
 
-    // Door handle strip near one edge.
     canvas.drawLine(
       at(0.9, 0.35),
       at(0.9, 0.65),
@@ -905,56 +925,13 @@ class _Room3DPainter extends CustomPainter {
     );
   }
 
-  /// Small arrow on the top face pointing where the unit faces.
-  void _paintFacingArrow(Canvas canvas, StorageUnit unit) {
-    final band = _zBand3D(unit);
-    final cx = unit.gx + unit.gw / 2;
-    final cy = unit.gy + unit.gh / 2;
-    final z = band.top + 0.02;
-
-    final dir = switch (unit.facing % 4) {
-      0 => const _Vec3(0, 1, 0),
-      1 => const _Vec3(1, 0, 0),
-      2 => const _Vec3(0, -1, 0),
-      _ => const _Vec3(-1, 0, 0),
-    };
-
-    final len = math.min(unit.gw, unit.gh) * 0.3;
-    final tipV = _Vec3(cx + dir.x * len, cy + dir.y * len, z);
-    final baseV = _Vec3(cx - dir.x * len * 0.5, cy - dir.y * len * 0.5, z);
-    // Perpendicular on the floor plane for arrowhead wings.
-    final perp = _Vec3(-dir.y, dir.x, 0);
-    final w1 = _Vec3(cx + dir.x * len * 0.4 + perp.x * len * 0.35,
-        cy + dir.y * len * 0.4 + perp.y * len * 0.35, z);
-    final w2 = _Vec3(cx + dir.x * len * 0.4 - perp.x * len * 0.35,
-        cy + dir.y * len * 0.4 - perp.y * len * 0.35, z);
-
-    final tip = camera.project(tipV)?.offset;
-    final tail = camera.project(baseV)?.offset;
-    final wing1 = camera.project(w1)?.offset;
-    final wing2 = camera.project(w2)?.offset;
-    if (tip == null || tail == null || wing1 == null || wing2 == null) return;
-
-    final paint = Paint()
-      ..strokeWidth = 2.4
-      ..strokeCap = StrokeCap.round
-      ..color = Colors.black.withValues(alpha: 0.45);
-    canvas.drawLine(tail, tip, paint);
-    canvas.drawLine(tip, wing1, paint);
-    canvas.drawLine(tip, wing2, paint);
-  }
-
   void _paintLabel(Canvas canvas, StorageUnit unit) {
-    final band = _zBand3D(unit);
-    final anchor = camera.project(_Vec3(
-      unit.gx + unit.gw / 2,
-      unit.gy + unit.gh / 2,
-      band.top + 0.15,
-    ));
+    final b = worldPlacementOf(unit, room);
+    final anchor =
+        camera.project(Vec3(b.center.x, b.center.y, b.max.z + 0.12));
     if (anchor == null) return;
 
-    // Fade labels with distance so far-side text doesn't clutter.
-    final alpha = (1.6 - anchor.depth / 30).clamp(0.35, 1.0);
+    final alpha = (1.6 - anchor.depth / 8).clamp(0.35, 1.0);
     final selected = unit.id == selectedUnitId;
     final count = itemCountByUnit[unit.id] ?? 0;
 
@@ -987,8 +964,8 @@ class _Room3DPainter extends CustomPainter {
     canvas.drawRRect(
       bg,
       Paint()
-        ..color = Colors.white
-            .withValues(alpha: (selected ? 0.97 : 0.78) * alpha),
+        ..color =
+            Colors.white.withValues(alpha: (selected ? 0.97 : 0.78) * alpha),
     );
     if (selected) {
       canvas.drawRRect(
@@ -1007,9 +984,7 @@ class _Room3DPainter extends CustomPainter {
 
   Color _shade(Color color, double factor) {
     final hsl = HSLColor.fromColor(color);
-    return hsl
-        .withLightness((hsl.lightness * factor).clamp(0.0, 1.0))
-        .toColor();
+    return hsl.withLightness((hsl.lightness * factor).clamp(0.0, 1.0)).toColor();
   }
 
   @override

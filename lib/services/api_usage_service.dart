@@ -106,9 +106,11 @@ class ApiUsageService {
     }
     try {
       final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      decoded['today'] ??= <String, dynamic>{};
-      decoded['total'] ??= <String, dynamic>{};
-      decoded['date'] ??= _todayKey();
+      // Coerce, don't just null-fill: a present-but-wrong-typed value (e.g. a
+      // corrupted/legacy `today: 0`) would otherwise crash recordCall's cast.
+      if (decoded['today'] is! Map) decoded['today'] = <String, dynamic>{};
+      if (decoded['total'] is! Map) decoded['total'] = <String, dynamic>{};
+      if (decoded['date'] is! String) decoded['date'] = _todayKey();
       return decoded;
     } catch (_) {
       return {'date': _todayKey(), 'today': {}, 'total': {}};

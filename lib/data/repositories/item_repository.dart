@@ -11,18 +11,37 @@ class ItemRepository {
       _firestore.collection(FirestorePaths.items(householdId));
 
   Stream<List<Item>> watchItems(String householdId) {
-    return _collection(householdId).snapshots().map((snapshot) => snapshot.docs
-        .map((doc) => Item.fromMap(doc.id, doc.data()))
-        .toList());
+    return _collection(householdId).snapshots().map((snapshot) {
+      final items = snapshot.docs
+          .map((doc) => Item.fromMap(doc.id, doc.data()))
+          .toList();
+      _sortStable(items);
+      return items;
+    });
   }
 
   Stream<List<Item>> watchItemsForSlot(String householdId, String slotId) {
     return _collection(householdId)
         .where('slotId', isEqualTo: slotId)
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => Item.fromMap(doc.id, doc.data()))
-            .toList());
+        .map((snapshot) {
+      final items = snapshot.docs
+          .map((doc) => Item.fromMap(doc.id, doc.data()))
+          .toList();
+      _sortStable(items);
+      return items;
+    });
+  }
+
+  /// Deterministic order (name, then id) so items don't reshuffle between
+  /// snapshots — otherwise a shelf's contents appear to jump around on every
+  /// rebuild or reopen.
+  static void _sortStable(List<Item> items) {
+    items.sort((a, b) {
+      final byName =
+          a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      return byName != 0 ? byName : a.id.compareTo(b.id);
+    });
   }
 
   Future<List<Item>> searchItems(String householdId, String query) async {
@@ -129,11 +148,23 @@ class ItemRepository {
     await batch.commit();
   }
 
+  /// Deletes every item stored in [unitId]'s slots. Authoritative: it looks up
+  /// the unit's slots on the server rather than trusting a (possibly empty or
+  /// stale) client-cached [slotIds] list, so a fast unit-delete can't leave
+  /// orphaned items behind. Any [slotIds] passed in are merged in as a fallback.
   Future<void> deleteItemsForUnit(String householdId, String unitId,
-      List<String> slotIds) async {
-    if (slotIds.isEmpty) return;
+      [List<String>? slotIds]) async {
+    final slotSnap = await _firestore
+        .collection(FirestorePaths.slots(householdId))
+        .where('unitId', isEqualTo: unitId)
+        .get();
+    final ids = <String>{
+      ...slotSnap.docs.map((d) => d.id),
+      ...?slotIds,
+    };
+    if (ids.isEmpty) return;
     final batch = _firestore.batch();
-    for (final slotId in slotIds) {
+    for (final slotId in ids) {
       final snapshot = await _collection(householdId)
           .where('slotId', isEqualTo: slotId)
           .get();

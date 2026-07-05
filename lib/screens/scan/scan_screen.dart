@@ -77,6 +77,10 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
       case AppLifecycleState.paused:
         return;
       case AppLifecycleState.resumed:
+        // Cancel any existing subscription first — an unbalanced resume (e.g.
+        // after a permission prompt) would otherwise leak a second listener and
+        // fire _onDetect twice per scan.
+        unawaited(_subscription?.cancel());
         _subscription = _controller.barcodes.listen(_onDetect);
         unawaited(_controller.start());
       case AppLifecycleState.inactive:
@@ -178,8 +182,25 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     if (uid == null) return;
 
     final householdId = parseHouseholdInvite(payload);
-    final household =
-        await ref.read(householdRepositoryProvider).joinHousehold(uid, householdId);
+    // Capture context-bound objects before the await so we can use them safely
+    // afterwards without an unsafe context-after-async access.
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    final Household? household;
+    try {
+      household = await ref
+          .read(householdRepositoryProvider)
+          .joinHousehold(uid, householdId);
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text("Couldn't join — check your connection and try again."),
+          ),
+        );
+      return;
+    }
     if (!mounted) return;
 
     if (household == null) {
@@ -189,8 +210,8 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
 
     ref.read(householdIdProvider.notifier).state = household.id;
     // Back out of the scanner to the home screen, now in the joined home.
-    Navigator.of(context).popUntil((route) => route.isFirst);
-    ScaffoldMessenger.of(context)
+    navigator.popUntil((route) => route.isFirst);
+    messenger
       ..clearSnackBars()
       ..showSnackBar(
         SnackBar(content: Text('Joined “${household.name}”')),
@@ -238,14 +259,30 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     if (!mounted) return;
 
     if (product != null) {
-      await ref.read(itemRepositoryProvider).placeInSlot(
-            householdId: householdId,
-            slotId: slot.id,
-            name: product.name,
-            category: product.category,
-            barcode: barcode,
-            imageUrl: product.imageUrl,
+      // Capture the messenger before the write so we can report failures
+      // without an unsafe context-after-async access.
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        await ref.read(itemRepositoryProvider).placeInSlot(
+              householdId: householdId,
+              slotId: slot.id,
+              name: product.name,
+              category: product.category,
+              barcode: barcode,
+              imageUrl: product.imageUrl,
+            );
+      } catch (_) {
+        messenger
+          ..clearSnackBars()
+          ..showSnackBar(
+            const SnackBar(
+              content:
+                  Text("Couldn't save — check your connection and try again."),
+              duration: Duration(seconds: 1),
+            ),
           );
+        return;
+      }
       if (mounted) {
         setState(() => _placedCount++);
         _toast('Placed ${product.name} on ${slot.label}');
@@ -315,14 +352,30 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     );
 
     final householdId = ref.read(householdIdProvider);
-    if (name == null || name.isEmpty || householdId == null) return;
+    if (name == null || name.isEmpty || householdId == null || !mounted) return;
 
-    await ref.read(itemRepositoryProvider).placeInSlot(
-          householdId: householdId,
-          slotId: slot.id,
-          name: name,
-          barcode: barcode,
+    // Capture the messenger before the write so we can report failures
+    // without an unsafe context-after-async access.
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(itemRepositoryProvider).placeInSlot(
+            householdId: householdId,
+            slotId: slot.id,
+            name: name,
+            barcode: barcode,
+          );
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content:
+                Text("Couldn't save — check your connection and try again."),
+            duration: Duration(seconds: 1),
+          ),
         );
+      return;
+    }
     if (mounted) {
       setState(() => _placedCount++);
       _toast('Placed $name on ${slot.label}');
@@ -481,9 +534,11 @@ class _ScanScreenState extends ConsumerState<ScanScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text(_placingIntoSlot
-            ? 'Scan into ${widget.targetSlot!.label}'
-            : 'Scan'),
+        title: Text(
+          _placingIntoSlot ? 'Scan into ${widget.targetSlot!.label}' : 'Scan',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         actions: [

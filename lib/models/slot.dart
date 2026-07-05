@@ -21,8 +21,8 @@ class Slot {
       householdId: map['householdId'] as String? ?? '',
       unitId: map['unitId'] as String? ?? '',
       label: map['label'] as String? ?? 'Shelf',
-      row: map['row'] as int? ?? 1,
-      column: map['column'] as int? ?? 1,
+      row: (map['row'] as num?)?.toInt() ?? 1,
+      column: (map['column'] as num?)?.toInt() ?? 1,
     );
   }
 

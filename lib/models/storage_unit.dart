@@ -112,11 +112,60 @@ const double kCmPerStorey = 100.0;
 int effectiveHeightCm(StorageUnit unit) {
   if (unit.heightCm != null) return unit.heightCm!;
   final band = unitZBand(unit);
-  return ((band.top - band.bottom) * kCmPerStorey).round();
+  // Clamp to the same range the height steppers use so a derived value never
+  // displays above the adjustable ceiling (which would jump down on first tap).
+  return ((band.top - band.bottom) * kCmPerStorey).round().clamp(20, 260);
 }
 
 /// Max doors/bays (columns) a unit can have.
 const int kMaxDoors = 4;
+
+/// The interior compartments (row, column, label) a unit should have. Fridges
+/// and freezers get realistic layouts — a fridge has main shelves, a column of
+/// door bins, and a crisper; a freezer has stacked drawers — while everything
+/// else is a uniform rows×columns grid. Used to generate/reconcile slots.
+List<({int row, int column, String label})> defaultCompartments(
+    StorageUnit unit) {
+  final rows = unit.rows.clamp(1, kMaxShelfRows);
+  switch (unit.type) {
+    case StorageUnitType.fridge:
+      // A fridge's `columns` = number of doors (1 or 2). Column 1 is the main
+      // shelves (+ crisper); each door contributes its own column of bins so
+      // adding a second door actually adds a second bank of door bins.
+      final doors = unit.columns.clamp(1, 2);
+      return [
+        for (var r = 1; r <= rows; r++)
+          (row: r, column: 1, label: r == rows ? 'Crisper' : 'Shelf $r'),
+        ...(doors == 1
+            ? [
+                for (var r = 1; r <= rows; r++)
+                  (row: r, column: 2, label: 'Door bin $r'),
+              ]
+            : [
+                for (var r = 1; r <= rows; r++)
+                  (row: r, column: 2, label: 'Left bin $r'),
+                for (var r = 1; r <= rows; r++)
+                  (row: r, column: 3, label: 'Right bin $r'),
+              ]),
+      ];
+    case StorageUnitType.freezer:
+      return [
+        for (var r = 1; r <= rows; r++)
+          (row: r, column: 1, label: 'Drawer $r'),
+      ];
+    default:
+      final cols = unit.columns.clamp(1, kMaxDoors);
+      return [
+        for (var r = 1; r <= rows; r++)
+          for (var c = 1; c <= cols; c++)
+            (
+              row: r,
+              column: c,
+              label: cols == 1 ? 'Shelf $r' : 'Row $r · Col $c',
+            ),
+      ];
+  }
+}
 
 /// A ready-made cabinet configuration for the "Add" flow, so common pieces are
 /// one tap away instead of a dozen steppers.
@@ -130,6 +179,8 @@ class UnitTemplate {
     required this.heightCm,
     required this.gw,
     required this.gh,
+    this.widthCm = 60,
+    this.depthCm = 60,
     this.defaultName,
   });
 
@@ -141,6 +192,10 @@ class UnitTemplate {
   final int heightCm;
   final int gw;
   final int gh;
+
+  /// Free-dimension defaults (cm) used by the wall-elevation editor.
+  final double widthCm;
+  final double depthCm;
   final String? defaultName;
 }
 
@@ -155,6 +210,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 90,
     gw: 2,
     gh: 2,
+    widthCm: 90,
+    depthCm: 60,
     defaultName: 'Cabinet',
   ),
   UnitTemplate(
@@ -166,6 +223,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 90,
     gw: 2,
     gh: 2,
+    widthCm: 60,
+    depthCm: 60,
     defaultName: 'Drawers',
   ),
   UnitTemplate(
@@ -177,6 +236,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 70,
     gw: 2,
     gh: 1,
+    widthCm: 80,
+    depthCm: 35,
     defaultName: 'Wall cabinet',
   ),
   UnitTemplate(
@@ -188,7 +249,22 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 210,
     gw: 2,
     gh: 2,
+    widthCm: 60,
+    depthCm: 60,
     defaultName: 'Pantry',
+  ),
+  UnitTemplate(
+    label: 'Open shelf',
+    type: StorageUnitType.shelf,
+    mount: UnitMount.wall,
+    rows: 1,
+    columns: 1,
+    heightCm: 32,
+    gw: 2,
+    gh: 1,
+    widthCm: 90,
+    depthCm: 25,
+    defaultName: 'Shelf',
   ),
   UnitTemplate(
     label: 'Fridge',
@@ -199,6 +275,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 180,
     gw: 2,
     gh: 2,
+    widthCm: 75,
+    depthCm: 70,
     defaultName: 'Fridge',
   ),
   UnitTemplate(
@@ -210,6 +288,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 90,
     gw: 2,
     gh: 2,
+    widthCm: 80,
+    depthCm: 60,
     defaultName: 'Sink',
   ),
   UnitTemplate(
@@ -221,6 +301,8 @@ const List<UnitTemplate> kUnitTemplates = [
     heightCm: 90,
     gw: 2,
     gh: 2,
+    widthCm: 75,
+    depthCm: 60,
     defaultName: 'Range',
   ),
 ];
@@ -238,10 +320,16 @@ class StorageUnit {
     this.mount = UnitMount.base,
     this.facing = 0,
     this.heightCm,
-    this.gx = 0,
-    this.gy = 0,
+    this.gx = -1,
+    this.gy = -1,
     this.gw = 2,
     this.gh = 2,
+    this.surfaceId,
+    this.xCm,
+    this.zCm,
+    this.widthCm,
+    this.hCm,
+    this.depthCm,
   });
 
   final String id;
@@ -265,14 +353,33 @@ class StorageUnit {
   /// from [rows] (shelf count) for backward compatibility.
   final int? heightCm;
 
-  /// Position and size on the room layout grid.
+  /// Position and size on the (legacy) room layout grid. Retained for
+  /// backward compatibility and migration; superseded by the elevation
+  /// placement below once [surfaceId] is set.
   final int gx;
   final int gy;
   final int gw;
   final int gh;
 
+  /// Elevation placement (the wall-based model). Null until the unit has been
+  /// migrated or placed on a surface.
+  ///
+  /// [surfaceId] is `"wall:N|E|S|W"` or `"island:{islandId}:{N|E|S|W}"`.
+  /// [xCm] is the left edge along the surface; [zCm] the bottom off the floor;
+  /// [widthCm]/[hCm]/[depthCm] the element's free dimensions in centimetres.
+  final String? surfaceId;
+  final double? xCm;
+  final double? zCm;
+  final double? widthCm;
+  final double? hCm;
+  final double? depthCm;
+
   /// Whether this unit has interior shelves/slots for storing items.
   bool get holdsItems => type.holdsItems;
+
+  /// True once the unit has been placed on a wall/island surface.
+  bool get hasElevationPlacement =>
+      surfaceId != null && xCm != null && widthCm != null && hCm != null;
 
   static UnitMount _defaultMountFor(StorageUnitType type) {
     return switch (type) {
@@ -293,19 +400,25 @@ class StorageUnit {
       roomId: map['roomId'] as String? ?? '',
       name: map['name'] as String? ?? 'Storage',
       type: type,
-      rows: map['rows'] as int? ?? 4,
-      columns: map['columns'] as int? ?? 1,
-      sortOrder: map['sortOrder'] as int? ?? 0,
+      rows: (map['rows'] as num?)?.toInt() ?? 4,
+      columns: (map['columns'] as num?)?.toInt() ?? 1,
+      sortOrder: (map['sortOrder'] as num?)?.toInt() ?? 0,
       mount: UnitMount.values.firstWhere(
         (m) => m.name == map['mount'],
         orElse: () => _defaultMountFor(type),
       ),
-      facing: (map['facing'] as int? ?? 0) % 4,
-      heightCm: map['heightCm'] as int?,
-      gx: map['gx'] as int? ?? -1,
-      gy: map['gy'] as int? ?? -1,
-      gw: map['gw'] as int? ?? 2,
-      gh: map['gh'] as int? ?? 2,
+      facing: ((map['facing'] as num?)?.toInt() ?? 0) % 4,
+      heightCm: (map['heightCm'] as num?)?.toInt(),
+      gx: (map['gx'] as num?)?.toInt() ?? -1,
+      gy: (map['gy'] as num?)?.toInt() ?? -1,
+      gw: (map['gw'] as num?)?.toInt() ?? 2,
+      gh: (map['gh'] as num?)?.toInt() ?? 2,
+      surfaceId: map['surfaceId'] as String?,
+      xCm: (map['xCm'] as num?)?.toDouble(),
+      zCm: (map['zCm'] as num?)?.toDouble(),
+      widthCm: (map['widthCm'] as num?)?.toDouble(),
+      hCm: (map['hCm'] as num?)?.toDouble(),
+      depthCm: (map['depthCm'] as num?)?.toDouble(),
     );
   }
 
@@ -324,6 +437,12 @@ class StorageUnit {
         'gy': gy,
         'gw': gw,
         'gh': gh,
+        if (surfaceId != null) 'surfaceId': surfaceId,
+        if (xCm != null) 'xCm': xCm,
+        if (zCm != null) 'zCm': zCm,
+        if (widthCm != null) 'widthCm': widthCm,
+        if (hCm != null) 'hCm': hCm,
+        if (depthCm != null) 'depthCm': depthCm,
       };
 
   bool get hasLayoutPosition => gx >= 0 && gy >= 0;
@@ -341,6 +460,12 @@ class StorageUnit {
     int? gy,
     int? gw,
     int? gh,
+    String? surfaceId,
+    double? xCm,
+    double? zCm,
+    double? widthCm,
+    double? hCm,
+    double? depthCm,
   }) {
     return StorageUnit(
       id: id,
@@ -358,6 +483,12 @@ class StorageUnit {
       gy: gy ?? this.gy,
       gw: gw ?? this.gw,
       gh: gh ?? this.gh,
+      surfaceId: surfaceId ?? this.surfaceId,
+      xCm: xCm ?? this.xCm,
+      zCm: zCm ?? this.zCm,
+      widthCm: widthCm ?? this.widthCm,
+      hCm: hCm ?? this.hCm,
+      depthCm: depthCm ?? this.depthCm,
     );
   }
 }

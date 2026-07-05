@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
+import 'package:wherein_kitchen/models/household.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 
@@ -61,10 +62,12 @@ class _HouseholdSetupScreenState extends ConsumerState<HouseholdSetupScreen> {
             ownerUid: user.uid,
           );
 
-      await _seedKitchen(householdId);
+      // Enter the home as soon as it exists so a seeding failure can't strand a
+      // half-created household — and a retry won't spawn a duplicate home.
       ref.read(householdIdProvider.notifier).state = householdId;
+      await _seedKitchen(householdId);
     } catch (e) {
-      setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -80,7 +83,9 @@ class _HouseholdSetupScreenState extends ConsumerState<HouseholdSetupScreen> {
       final user = ref.read(authServiceProvider).currentUser;
       if (user == null) return;
 
-      final householdId = _joinIdController.text.trim();
+      // Accept either a bare id or a full whereinkitchen://join/<id> invite,
+      // matching the scan and home-screen join flows.
+      final householdId = parseHouseholdInvite(_joinIdController.text);
       final household = await ref
           .read(householdRepositoryProvider)
           .getHousehold(householdId);

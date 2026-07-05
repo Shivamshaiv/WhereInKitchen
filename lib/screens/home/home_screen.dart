@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,7 +11,7 @@ import 'package:wherein_kitchen/models/room.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/screens/item/add_item_screen.dart';
-import 'package:wherein_kitchen/screens/room/room_layout_screen.dart';
+import 'package:wherein_kitchen/screens/room/room_top_view_screen.dart';
 import 'package:wherein_kitchen/screens/scan/scan_screen.dart';
 import 'package:wherein_kitchen/screens/search/search_result_screen.dart';
 import 'package:wherein_kitchen/screens/settings/settings_screen.dart';
@@ -25,15 +27,26 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _searchController = TextEditingController();
+  Timer? _searchDebounce;
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
 
   void _onSearchChanged(String value) {
-    ref.read(searchQueryProvider.notifier).state = value;
+    // Debounce so the full-list filter runs at most a few times/sec instead of
+    // once per keystroke. Clearing is applied immediately.
+    _searchDebounce?.cancel();
+    if (value.trim().isEmpty) {
+      ref.read(searchQueryProvider.notifier).state = value;
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+      ref.read(searchQueryProvider.notifier).state = value;
+    });
   }
 
   void _openSearchResult(Item item) {
@@ -42,6 +55,106 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         builder: (_) => SearchResultScreen(item: item),
       ),
     );
+  }
+
+  Future<void> _roomActions(Room room) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('Rename room'),
+              onTap: () => Navigator.pop(sheetContext, 'rename'),
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline,
+                  color: Theme.of(sheetContext).colorScheme.error),
+              title: const Text('Delete room'),
+              subtitle: const Text('Removes the room and everything in it'),
+              onTap: () => Navigator.pop(sheetContext, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'rename') {
+      await _renameRoom(room);
+    } else if (action == 'delete') {
+      await _deleteRoom(room);
+    }
+  }
+
+  Future<void> _renameRoom(Room room) async {
+    final hh = ref.read(householdIdProvider);
+    if (hh == null) return;
+    final controller = TextEditingController(text: room.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename room'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, controller.text.trim()),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || name == room.name || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(roomRepositoryProvider).renameRoom(hh, room.id, name);
+      messenger.showSnackBar(SnackBar(content: Text('Renamed to “$name”')));
+    } catch (_) {
+      messenger.showSnackBar(
+          const SnackBar(content: Text('Couldn’t rename — try again.')));
+    }
+  }
+
+  Future<void> _deleteRoom(Room room) async {
+    final hh = ref.read(householdIdProvider);
+    if (hh == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete “${room.name}”?'),
+        content: const Text(
+            'This permanently removes the room and every unit, shelf, and item '
+            'inside it. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dialogContext).colorScheme.error),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(roomRepositoryProvider).deleteRoom(hh, room.id);
+      messenger.showSnackBar(SnackBar(content: Text('Deleted “${room.name}”')));
+    } catch (_) {
+      messenger.showSnackBar(
+          const SnackBar(content: Text('Couldn’t delete — try again.')));
+    }
   }
 
   Future<void> _createHome() async {
@@ -73,23 +186,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     final uid = ref.read(authStateProvider).valueOrNull?.uid;
     if (uid == null) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
     final id = const Uuid().v4();
-    await ref.read(householdRepositoryProvider).createHousehold(
-          id: id,
-          name: name,
-          ownerUid: uid,
-        );
-    // Give the new home a Kitchen to start with.
-    await ref.read(roomRepositoryProvider).createRoom(
-          householdId: id,
-          name: 'Kitchen',
-          sortOrder: 0,
-        );
-    ref.read(householdIdProvider.notifier).state = id;
-    if (mounted) {
-      ScaffoldMessenger.of(context)
+    try {
+      await ref.read(householdRepositoryProvider).createHousehold(
+            id: id,
+            name: name,
+            ownerUid: uid,
+          );
+      // Give the new home a Kitchen to start with.
+      await ref.read(roomRepositoryProvider).createRoom(
+            householdId: id,
+            name: 'Kitchen',
+            sortOrder: 0,
+          );
+      ref.read(householdIdProvider.notifier).state = id;
+      messenger
         ..clearSnackBars()
         ..showSnackBar(SnackBar(content: Text('Created “$name”')));
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+            content: Text('Couldn’t create the home — try again.')));
     }
   }
 
@@ -187,7 +307,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       builder: (dialogContext) {
         final scheme = Theme.of(dialogContext).colorScheme;
         return AlertDialog(
-          title: Text('Invite to ${household?.name ?? 'this home'}'),
+          title: Text(
+            'Invite to ${household?.name ?? 'this home'}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -258,6 +382,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final units = ref.watch(unitsProvider);
     final searchResults = ref.watch(searchResultsProvider);
     final query = ref.watch(searchQueryProvider);
+
+    // Switching/joining/creating a home must not carry the old home's search or
+    // highlight into the new one (which would show stale results over unrelated
+    // content). Reset on any change of the active household.
+    ref.listen<String?>(householdIdProvider, (prev, next) {
+      if (prev == next) return;
+      _searchDebounce?.cancel();
+      _searchController.clear();
+      ref.read(searchQueryProvider.notifier).state = '';
+      ref.read(highlightSlotIdProvider.notifier).state = null;
+      ref.read(highlightItemNameProvider.notifier).state = null;
+    });
 
     return Scaffold(
       drawer: _HouseSwitcherDrawer(
@@ -391,6 +527,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               );
             }
 
+            // Build a per-unit item-count index once per build instead of
+            // re-scanning all slots and items for every room below.
+            final itemCountByUnitId = _itemCountByUnitId();
+
             return ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
               children: [
@@ -412,7 +552,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ...roomList.map((room) {
                   final roomUnits =
                       unitList.where((u) => u.roomId == room.id).toList();
-                  final itemTotal = _itemCountForUnits(roomUnits);
+                  final itemTotal = roomUnits.fold<int>(
+                    0,
+                    (sum, u) => sum + (itemCountByUnitId[u.id] ?? 0),
+                  );
                   final scheme = Theme.of(context).colorScheme;
                   return Card(
                     clipBehavior: Clip.antiAlias,
@@ -445,10 +588,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       onTap: () {
                         Navigator.of(context).push(
                           MaterialPageRoute(
-                            builder: (_) => RoomLayoutScreen(room: room),
+                            builder: (_) => RoomTopViewScreen(room: room),
                           ),
                         );
                       },
+                      onLongPress: () => _roomActions(room),
                     ),
                   );
                 }),
@@ -464,7 +608,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   children: unitList.map((unit) {
                     return ActionChip(
                       avatar: Icon(_iconForUnitType(unit.type), size: 18),
-                      label: Text(unit.name),
+                      label: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 200),
+                        child: Text(
+                          unit.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                       onPressed: () {
                         Navigator.of(context).push(
                           MaterialPageRoute(
@@ -487,15 +638,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  int _itemCountForUnits(List<StorageUnit> units) {
+  /// Builds a map of storage-unit id -> number of items stored in that unit,
+  /// scanning slots and items just once per build.
+  Map<String, int> _itemCountByUnitId() {
     final items = ref.watch(itemsProvider).value ?? [];
     final slots = ref.watch(slotsProvider).value ?? [];
-    final unitIds = units.map((u) => u.id).toSet();
-    final slotIds = slots
-        .where((s) => unitIds.contains(s.unitId))
-        .map((s) => s.id)
-        .toSet();
-    return items.where((i) => slotIds.contains(i.slotId)).length;
+    final unitIdBySlotId = <String, String>{
+      for (final s in slots) s.id: s.unitId,
+    };
+    final counts = <String, int>{};
+    for (final i in items) {
+      final unitId = unitIdBySlotId[i.slotId];
+      if (unitId == null) continue;
+      counts[unitId] = (counts[unitId] ?? 0) + 1;
+    }
+    return counts;
   }
 
   Future<void> _addRoom() async {

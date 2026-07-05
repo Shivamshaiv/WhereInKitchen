@@ -8,7 +8,7 @@ import 'package:wherein_kitchen/models/slot.dart';
 import 'package:wherein_kitchen/models/storage_unit.dart';
 import 'package:wherein_kitchen/providers/providers.dart';
 import 'package:wherein_kitchen/services/auth_service.dart';
-import 'package:wherein_kitchen/widgets/shelf_map.dart';
+import 'package:wherein_kitchen/widgets/interior/unit_interior.dart';
 
 class AddItemScreen extends ConsumerStatefulWidget {
   const AddItemScreen({
@@ -81,7 +81,8 @@ class _AddItemScreenState extends ConsumerState<AddItemScreen> {
 
     final bytes = await image.readAsBytes();
     final encoded = ImageService.encodeThumbnail(Uint8List.fromList(bytes));
-    if (encoded == null && mounted) {
+    if (!mounted) return;
+    if (encoded == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Photo too large — try a smaller image')),
       );
@@ -103,6 +104,9 @@ class _AddItemScreenState extends ConsumerState<AddItemScreen> {
     if (name.isEmpty) return;
 
     setState(() => _saving = true);
+
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
 
     try {
       final aliases = _aliasesController.text
@@ -130,12 +134,16 @@ class _AddItemScreenState extends ConsumerState<AddItemScreen> {
 
       await ref.read(itemRepositoryProvider).addItem(item);
 
-      if (mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Added $name')),
-        );
-      }
+      navigator.popUntil((route) => route.isFirst);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Added $name')),
+      );
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text("Couldn't save — check your connection and try again."),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -280,10 +288,18 @@ class _ShelfPickerSheetState extends ConsumerState<_ShelfPickerSheet> {
               const SizedBox(height: 12),
               DropdownButtonFormField<StorageUnit>(
                 initialValue: unit,
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Storage unit'),
                 items: widget.units
                     .map(
-                      (u) => DropdownMenuItem(value: u, child: Text(u.name)),
+                      (u) => DropdownMenuItem(
+                        value: u,
+                        child: Text(
+                          u.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                     )
                     .toList(),
                 onChanged: (value) => setState(() => _unit = value),
@@ -292,19 +308,14 @@ class _ShelfPickerSheetState extends ConsumerState<_ShelfPickerSheet> {
               Expanded(
                 child: householdId == null
                     ? const Center(child: CircularProgressIndicator())
-                    : StreamBuilder<List<Slot>>(
-                        stream: ref
-                            .read(slotRepositoryProvider)
-                            .watchSlotsForUnit(householdId, unit.id),
-                        builder: (context, snapshot) {
-                          final slots = snapshot.data ?? [];
+                    : ref.watch(slotsForUnitProvider(unit.id)).when(
+                        data: (slots) {
                           if (slots.isEmpty) {
                             return const Center(
-                              child: CircularProgressIndicator(),
+                              child: Text('Setting up shelves…'),
                             );
                           }
-
-                          return ShelfMap(
+                          return UnitInterior(
                             unit: unit,
                             slots: slots,
                             itemCountBySlot: const {},
@@ -315,6 +326,9 @@ class _ShelfPickerSheetState extends ConsumerState<_ShelfPickerSheet> {
                             },
                           );
                         },
+                        loading: () =>
+                            const Center(child: CircularProgressIndicator()),
+                        error: (e, _) => Center(child: Text('Error: $e')),
                       ),
               ),
               FilledButton(

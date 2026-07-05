@@ -19,6 +19,7 @@ class WhereInKitchenApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: buildLightTheme(),
       darkTheme: buildDarkTheme(),
+      themeMode: ref.watch(themeModeProvider),
       home: authState.when(
         data: (user) {
           if (user == null) return const AuthScreen();
